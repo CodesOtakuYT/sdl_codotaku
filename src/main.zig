@@ -5,6 +5,8 @@ const za = Core.za;
 const Camera = @import("camera.zig");
 const Mesh = @import("mesh.zig");
 const Texture = @import("texture.zig");
+const Shader = @import("shader.zig");
+const Pipeline = @import("pipeline.zig");
 
 pub fn main() !void {
     var debug_allocator = std.heap.DebugAllocator(.{}).init;
@@ -13,7 +15,7 @@ pub fn main() !void {
     _ = try sdl3.setMemoryFunctionsByAllocator(allocator);
 
     var core = try Core.init(.{
-        .title = "SDL Codotaku - Textured Cube",
+        .title = "SDL Codotaku - Refactored Engine",
         .width = 800,
         .height = 600,
         .debug_mode = true,
@@ -30,7 +32,6 @@ pub fn main() !void {
     var depth_texture = try core.createDepthTexture(width, height);
     defer core.device.releaseTexture(depth_texture);
 
-    // 1. Create a Sampler
     const sampler = try core.createSampler(.{
         .min_filter = .nearest,
         .mag_filter = .nearest,
@@ -41,62 +42,41 @@ pub fn main() !void {
     });
     defer core.device.releaseSampler(sampler);
 
-    // 2. Load Shaders with Sampler/Uniform counts
-    const pipeline = blk: {
-        const vertex_shader = try core.loadShader(.{
-            .filename = "TexturedQuadWithMatrix.vert", // New Shader
-            .uniform_buffer_count = 1,
-        });
-        defer core.device.releaseShader(vertex_shader);
+    // --- Main Scene Pipeline ---
+    const main_vert = try Shader.init(&core, .{ .filename = "TexturedQuadWithMatrix.vert", .uniform_buffer_count = 1 });
+    const main_frag = try Shader.init(&core, .{ .filename = "TexturedQuad.frag", .sampler_count = 1 });
+    defer main_vert.deinit(&core);
+    defer main_frag.deinit(&core);
 
-        const fragment_shader = try core.loadShader(.{
-            .filename = "TexturedQuad.frag", // New Shader
-            .sampler_count = 1, // Must match the shader!
-        });
-        defer core.device.releaseShader(fragment_shader);
+    const main_pipeline = try Pipeline.init(&core, .{
+        .vert = main_vert,
+        .frag = main_frag,
+        .depth_test = true,
+    });
+    defer main_pipeline.deinit(&core);
 
-        break :blk try core.createPipeline(.{
-            .vertex_shader = vertex_shader,
-            .fragment_shader = fragment_shader,
-            .depth_test = true,
-        });
-    };
-    defer core.device.releaseGraphicsPipeline(pipeline);
+    // --- Skybox Pipeline ---
+    const sky_vert = try Shader.init(&core, .{ .filename = "Skybox.vert", .uniform_buffer_count = 1 });
+    const sky_frag = try Shader.init(&core, .{ .filename = "Skybox.frag", .sampler_count = 1 });
+    defer sky_vert.deinit(&core);
+    defer sky_frag.deinit(&core);
 
-    const skybox_pipeline = blk: {
-        const vertex_shader = try core.loadShader(.{
-            .filename = "Skybox.vert",
-            .uniform_buffer_count = 1,
-        });
-        defer core.device.releaseShader(vertex_shader);
+    const sky_pipeline = try Pipeline.init(&core, .{
+        .vert = sky_vert,
+        .frag = sky_frag,
+        .depth_test = true,
+        .depth_write = false,
+    });
+    defer sky_pipeline.deinit(&core);
 
-        const fragment_shader = try core.loadShader(.{
-            .filename = "Skybox.frag",
-            .sampler_count = 1,
-        });
-        defer core.device.releaseShader(fragment_shader);
-
-        // We want depth test = true (to draw behind),
-        // but we'll use a specific mesh/state trick
-        break :blk try core.createPipeline(.{
-            .vertex_shader = vertex_shader,
-            .fragment_shader = fragment_shader,
-            .depth_test = true,
-            .depth_write = false,
-        });
-    };
-    defer core.device.releaseGraphicsPipeline(skybox_pipeline);
-
+    // --- Resources ---
     const texture = try Texture.loadPNG(&core, "Content/Images/viking_room.png");
     defer texture.deinit(&core);
 
     const skybox_texture = try Texture.loadCubemap(&core, .{
-        "Content/Images/skybox/posx.png", // +X
-        "Content/Images/skybox/negx.png", // -X
-        "Content/Images/skybox/posy.png", // +Y
-        "Content/Images/skybox/negy.png", // -Y
-        "Content/Images/skybox/posz.png", // +Z
-        "Content/Images/skybox/negz.png", // -Z
+        "Content/Images/skybox/posx.png", "Content/Images/skybox/negx.png",
+        "Content/Images/skybox/posy.png", "Content/Images/skybox/negy.png",
+        "Content/Images/skybox/posz.png", "Content/Images/skybox/negz.png",
     });
     defer skybox_texture.deinit(&core);
 
@@ -115,44 +95,31 @@ pub fn main() !void {
         camera.update(dt);
 
         if (try core.beginFrame()) |frame| {
-            {
-                const renderpass = try frame.renderpass(.{ .r = 0.1, .g = 0.1, .b = 0.1, .a = 1.0 }, depth_texture);
+            const renderpass = try frame.renderpass(.{ .r = 0.1, .g = 0.1, .b = 0.1, .a = 1.0 }, depth_texture);
 
-                renderpass.bindGraphicsPipeline(skybox_pipeline);
-                renderpass.bindFragmentSamplers(0, &.{.{
-                    .texture = skybox_texture.handle,
-                    .sampler = sampler,
-                }});
+            // 1. Draw Skybox
+            renderpass.bindGraphicsPipeline(sky_pipeline.handle);
+            renderpass.bindFragmentSamplers(0, &.{.{ .texture = skybox_texture.handle, .sampler = sampler }});
 
-                // Calculate Skybox Matrix: (Proj * (View without translation))
-                const proj = camera.getProjMatrix(za.Vec2.new(@floatFromInt(width), @floatFromInt(height)));
-                var view = camera.getViewMatrix();
+            const proj = camera.getProjMatrix(za.Vec2.new(@floatFromInt(width), @floatFromInt(height)));
+            var view = camera.getViewMatrix();
+            view.data[3][0] = 0;
+            view.data[3][1] = 0;
+            view.data[3][2] = 0; // Remove translation
 
-                // Strip translation (Column 3 in zalgebra/GLM math)
-                view.data[3][0] = 0;
-                view.data[3][1] = 0;
-                view.data[3][2] = 0;
+            const sky_mvp = za.Mat4.mul(proj, view);
+            frame.command_buffer.pushVertexUniformData(0, std.mem.asBytes(&sky_mvp));
+            sky_mesh.draw(renderpass);
 
-                const sky_mvp = za.Mat4.mul(proj, view);
+            // 2. Draw Scene
+            renderpass.bindGraphicsPipeline(main_pipeline.handle);
+            renderpass.bindFragmentSamplers(0, &.{.{ .texture = texture.handle, .sampler = sampler }});
 
-                frame.command_buffer.pushVertexUniformData(0, std.mem.asBytes(&sky_mvp));
-                sky_mesh.draw(renderpass);
+            const mat = camera.getDescriptorMatrix(za.Vec2.new(@floatFromInt(width), @floatFromInt(height)));
+            frame.command_buffer.pushVertexUniformData(0, std.mem.asBytes(&mat));
+            mesh.draw(renderpass);
 
-                renderpass.bindGraphicsPipeline(pipeline);
-
-                // 4. Bind Texture and Sampler
-                renderpass.bindFragmentSamplers(0, &.{.{
-                    .texture = texture.handle,
-                    .sampler = sampler,
-                }});
-
-                const mat = camera.getDescriptorMatrix(za.Vec2.new(@floatFromInt(width), @floatFromInt(height)));
-                frame.command_buffer.pushVertexUniformData(0, std.mem.asBytes(&mat));
-
-                mesh.draw(renderpass);
-
-                renderpass.end();
-            }
+            renderpass.end();
             try frame.end();
         }
 
