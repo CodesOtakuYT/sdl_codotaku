@@ -98,13 +98,25 @@ const Frame = struct {
         try self.command_buffer.submit();
     }
 
-    pub fn renderpass(self: Frame, clear_color: sdl3.pixels.FColor) !sdl3.gpu.RenderPass {
+    pub fn renderpass(self: Frame, clear_color: sdl3.pixels.FColor, depth_texture: ?sdl3.gpu.Texture) !sdl3.gpu.RenderPass {
+        const depth_info: ?sdl3.gpu.DepthStencilTargetInfo = if (depth_texture) |dt| .{
+            .texture = dt,
+            .cycle = true,
+            .clear_depth = 1.0,
+            .clear_stencil = 0,
+            .load = .clear,
+            .store = .store,
+            .stencil_load = .clear,
+            .stencil_store = .store,
+        } else null;
+
         const render_pass = self.command_buffer.beginRenderPass(&.{sdl3.gpu.ColorTargetInfo{
             .texture = self.texture,
             .clear_color = clear_color,
             .load = .clear,
             .store = .store,
-        }}, null);
+        }}, if (depth_info) |di| di else null);
+
         render_pass.setViewport(.{ .max_depth = 1, .region = .{
             .x = 0,
             .y = 0,
@@ -184,6 +196,7 @@ pub fn loadShader(
 const PipelineInfo = struct {
     vertex_shader: sdl3.gpu.Shader,
     fragment_shader: sdl3.gpu.Shader,
+    depth_test: bool = false,
 };
 
 pub const Vertex = struct {
@@ -192,44 +205,47 @@ pub const Vertex = struct {
 };
 
 pub fn createPipeline(self: *Self, info: PipelineInfo) !sdl3.gpu.GraphicsPipeline {
-    const pipeline = try self.device.createGraphicsPipeline(
-        .{
-            .vertex_shader = info.vertex_shader,
-            .fragment_shader = info.fragment_shader,
-            .target_info = .{
-                .color_target_descriptions = &.{
-                    sdl3.gpu.ColorTargetDescription{
-                        .format = try self.device.getSwapchainTextureFormat(self.window),
-                    },
+    return self.device.createGraphicsPipeline(.{
+        .vertex_shader = info.vertex_shader,
+        .fragment_shader = info.fragment_shader,
+        .depth_stencil_state = if (info.depth_test) sdl3.gpu.DepthStencilState{
+            .enable_depth_test = true,
+            .enable_depth_write = true,
+            .compare = .less,
+            .write_mask = 0xFF,
+        } else .{},
+        .target_info = sdl3.gpu.GraphicsPipelineTargetInfo{
+            .color_target_descriptions = &.{
+                sdl3.gpu.ColorTargetDescription{
+                    .format = try self.device.getSwapchainTextureFormat(self.window),
                 },
             },
-            .vertex_input_state = sdl3.gpu.VertexInputState{
-                .vertex_buffer_descriptions = &.{
-                    sdl3.gpu.VertexBufferDescription{
-                        .input_rate = .vertex,
-                        .slot = 0,
-                        .pitch = @sizeOf(Vertex),
-                    },
+            .depth_stencil_format = if (info.depth_test) .depth16_unorm else null,
+        },
+        .vertex_input_state = sdl3.gpu.VertexInputState{
+            .vertex_buffer_descriptions = &.{
+                sdl3.gpu.VertexBufferDescription{
+                    .input_rate = .vertex,
+                    .slot = 0,
+                    .pitch = @sizeOf(Vertex),
                 },
-                .vertex_attributes = &.{
-                    sdl3.gpu.VertexAttribute{
-                        .buffer_slot = 0,
-                        .format = .f32x3,
-                        .location = 0,
-                        .offset = @offsetOf(Vertex, "position"),
-                    },
-                    sdl3.gpu.VertexAttribute{
-                        .buffer_slot = 0,
-                        .format = .u8x4_normalized,
-                        .location = 1,
-                        .offset = @offsetOf(Vertex, "color"),
-                    },
+            },
+            .vertex_attributes = &.{
+                sdl3.gpu.VertexAttribute{
+                    .buffer_slot = 0,
+                    .format = .f32x3,
+                    .location = 0,
+                    .offset = @offsetOf(Vertex, "position"),
+                },
+                sdl3.gpu.VertexAttribute{
+                    .buffer_slot = 0,
+                    .format = .u8x4_normalized,
+                    .location = 1,
+                    .offset = @offsetOf(Vertex, "color"),
                 },
             },
         },
-    );
-
-    return pipeline;
+    });
 }
 
 pub fn createBuffer(self: *Self, size: u32, usage: sdl3.gpu.BufferUsageFlags) !sdl3.gpu.Buffer {
@@ -237,32 +253,82 @@ pub fn createBuffer(self: *Self, size: u32, usage: sdl3.gpu.BufferUsageFlags) !s
     return buffer;
 }
 
-pub fn uploadData(self: *Self, comptime T: type, data: []T, usage: sdl3.gpu.BufferUsageFlags) !sdl3.gpu.Buffer {
-    const size: u32 = @intCast(data.len * @sizeOf(T));
-    const buffer = try self.createBuffer(size, usage);
+const BufferUpload = struct {
+    data: []const u8,
+    usage: sdl3.gpu.BufferUsageFlags,
+};
+
+pub fn uploadBuffers(self: *Self, uploads: []const BufferUpload) ![]sdl3.gpu.Buffer {
+    // Calculate total size and per-buffer offsets
+    var total_size: u32 = 0;
+    const offsets = try self.allocator.alloc(u32, uploads.len);
+    defer self.allocator.free(offsets);
+
+    for (uploads, 0..) |upload, i| {
+        offsets[i] = total_size;
+        total_size += @intCast(upload.data.len);
+    }
+
+    // Create all GPU buffers
+    const buffers = try self.allocator.alloc(sdl3.gpu.Buffer, uploads.len);
+    errdefer self.allocator.free(buffers);
+
+    for (uploads, 0..) |upload, i| {
+        buffers[i] = try self.createBuffer(@intCast(upload.data.len), upload.usage);
+    }
+
+    // Single transfer buffer for everything
     const transfer_buffer = try self.device.createTransferBuffer(.{
-        .size = size,
+        .size = total_size,
         .usage = .upload,
     });
     defer self.device.releaseTransferBuffer(transfer_buffer);
+
+    // Map once and copy all data at their respective offsets
     const mapped_data = try self.device.mapTransferBuffer(transfer_buffer, false);
-    const data_bytes = std.mem.sliceAsBytes(data);
-    @memcpy(mapped_data[0..size], data_bytes);
+    for (uploads, 0..) |upload, i| {
+        @memcpy(mapped_data[offsets[i]..][0..upload.data.len], upload.data);
+    }
     self.device.unmapTransferBuffer(transfer_buffer);
+
+    // Single command buffer and copy pass for all uploads
     const command_buffer = try self.device.acquireCommandBuffer();
     {
         const copy_pass = command_buffer.beginCopyPass();
         defer copy_pass.end();
 
-        copy_pass.uploadToBuffer(.{
-            .offset = 0,
-            .transfer_buffer = transfer_buffer,
-        }, .{
-            .buffer = buffer,
-            .offset = 0,
-            .size = size,
-        }, false);
+        for (uploads, 0..) |upload, i| {
+            copy_pass.uploadToBuffer(.{
+                .transfer_buffer = transfer_buffer,
+                .offset = offsets[i],
+            }, .{
+                .buffer = buffers[i],
+                .offset = 0,
+                .size = @intCast(upload.data.len),
+            }, false);
+        }
     }
     try command_buffer.submit();
-    return buffer;
+
+    return buffers;
+}
+
+// Typed helper to make call sites cleaner
+pub fn makeUpload(comptime T: type, data: []const T, usage: sdl3.gpu.BufferUsageFlags) BufferUpload {
+    return .{
+        .data = std.mem.sliceAsBytes(data),
+        .usage = usage,
+    };
+}
+
+pub fn createDepthTexture(self: *Self, width: u32, height: u32) !sdl3.gpu.Texture {
+    return self.device.createTexture(.{
+        .width = width,
+        .height = height,
+        .layer_count_or_depth = 1,
+        .num_levels = 1,
+        .sample_count = .no_multisampling,
+        .format = .depth16_unorm,
+        .usage = .{ .depth_stencil_target = true },
+    });
 }
