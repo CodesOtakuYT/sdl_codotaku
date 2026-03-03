@@ -1,5 +1,6 @@
 pub const sdl3 = @import("sdl3");
 const std = @import("std");
+pub const za = @import("zalgebra");
 
 const Self = @This();
 
@@ -185,6 +186,11 @@ const PipelineInfo = struct {
     fragment_shader: sdl3.gpu.Shader,
 };
 
+pub const Vertex = struct {
+    position: za.Vec3,
+    color: za.GenericVector(4, u8),
+};
+
 pub fn createPipeline(self: *Self, info: PipelineInfo) !sdl3.gpu.GraphicsPipeline {
     const pipeline = try self.device.createGraphicsPipeline(
         .{
@@ -197,8 +203,66 @@ pub fn createPipeline(self: *Self, info: PipelineInfo) !sdl3.gpu.GraphicsPipelin
                     },
                 },
             },
+            .vertex_input_state = sdl3.gpu.VertexInputState{
+                .vertex_buffer_descriptions = &.{
+                    sdl3.gpu.VertexBufferDescription{
+                        .input_rate = .vertex,
+                        .slot = 0,
+                        .pitch = @sizeOf(Vertex),
+                    },
+                },
+                .vertex_attributes = &.{
+                    sdl3.gpu.VertexAttribute{
+                        .buffer_slot = 0,
+                        .format = .f32x3,
+                        .location = 0,
+                        .offset = @offsetOf(Vertex, "position"),
+                    },
+                    sdl3.gpu.VertexAttribute{
+                        .buffer_slot = 0,
+                        .format = .u8x4_normalized,
+                        .location = 1,
+                        .offset = @offsetOf(Vertex, "color"),
+                    },
+                },
+            },
         },
     );
 
     return pipeline;
+}
+
+pub fn createBuffer(self: *Self, size: u32, usage: sdl3.gpu.BufferUsageFlags) !sdl3.gpu.Buffer {
+    const buffer = try self.device.createBuffer(.{ .size = size, .usage = usage });
+    return buffer;
+}
+
+pub fn uploadData(self: *Self, comptime T: type, data: []T, usage: sdl3.gpu.BufferUsageFlags) !sdl3.gpu.Buffer {
+    const size: u32 = @intCast(data.len * @sizeOf(T));
+    const buffer = try self.createBuffer(size, usage);
+    const transfer_buffer = try self.device.createTransferBuffer(.{
+        .size = size,
+        .usage = .upload,
+    });
+    defer self.device.releaseTransferBuffer(transfer_buffer);
+    const mapped_data = try self.device.mapTransferBuffer(transfer_buffer, false);
+    const data_bytes = std.mem.sliceAsBytes(data);
+    @memcpy(mapped_data[0..size], data_bytes);
+    self.device.unmapTransferBuffer(transfer_buffer);
+    const command_buffer = try self.device.acquireCommandBuffer();
+    {
+        const copy_pass = command_buffer.beginCopyPass();
+        defer copy_pass.end();
+
+        copy_pass.uploadToBuffer(.{
+            .offset = 0,
+            .transfer_buffer = transfer_buffer,
+        }, .{
+            .buffer = buffer,
+            .offset = 0,
+            .size = size,
+        }, false);
+    }
+    try command_buffer.submit();
+    return buffer;
 }
