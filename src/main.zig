@@ -62,11 +62,48 @@ pub fn main() !void {
     };
     defer core.device.releaseGraphicsPipeline(pipeline);
 
+    const skybox_pipeline = blk: {
+        const vertex_shader = try core.loadShader(.{
+            .filename = "Skybox.vert",
+            .uniform_buffer_count = 1,
+        });
+        defer core.device.releaseShader(vertex_shader);
+
+        const fragment_shader = try core.loadShader(.{
+            .filename = "Skybox.frag",
+            .sampler_count = 1,
+        });
+        defer core.device.releaseShader(fragment_shader);
+
+        // We want depth test = true (to draw behind),
+        // but we'll use a specific mesh/state trick
+        break :blk try core.createPipeline(.{
+            .vertex_shader = vertex_shader,
+            .fragment_shader = fragment_shader,
+            .depth_test = true,
+            .depth_write = false,
+        });
+    };
+    defer core.device.releaseGraphicsPipeline(skybox_pipeline);
+
     const texture = try core.loadTexturePNG("Content/Images/viking_room.png");
     defer core.device.releaseTexture(texture);
 
-    var cube_mesh = try Mesh.initObj(&core, @embedFile("viking_room.obj"));
-    defer cube_mesh.deinit(&core);
+    const skybox_texture = try core.loadCubemapPNG(.{
+        "Content/Images/skybox/posx.png", // +X
+        "Content/Images/skybox/negx.png", // -X
+        "Content/Images/skybox/posy.png", // +Y
+        "Content/Images/skybox/negy.png", // -Y
+        "Content/Images/skybox/posz.png", // +Z
+        "Content/Images/skybox/negz.png", // -Z
+    });
+    defer core.device.releaseTexture(skybox_texture);
+
+    var mesh = try Mesh.initObj(&core, @embedFile("viking_room.obj"));
+    defer mesh.deinit(&core);
+
+    var sky_mesh = try Mesh.initCube(&core);
+    defer sky_mesh.deinit(&core);
 
     var start_ticks = sdl3.timer.getMillisecondsSinceInit();
     var quit = false;
@@ -80,6 +117,26 @@ pub fn main() !void {
             {
                 const renderpass = try frame.renderpass(.{ .r = 0.1, .g = 0.1, .b = 0.1, .a = 1.0 }, depth_texture);
 
+                renderpass.bindGraphicsPipeline(skybox_pipeline);
+                renderpass.bindFragmentSamplers(0, &.{.{
+                    .texture = skybox_texture,
+                    .sampler = sampler,
+                }});
+
+                // Calculate Skybox Matrix: (Proj * (View without translation))
+                const proj = camera.getProjMatrix(za.Vec2.new(@floatFromInt(width), @floatFromInt(height)));
+                var view = camera.getViewMatrix();
+
+                // Strip translation (Column 3 in zalgebra/GLM math)
+                view.data[3][0] = 0;
+                view.data[3][1] = 0;
+                view.data[3][2] = 0;
+
+                const sky_mvp = za.Mat4.mul(proj, view);
+
+                frame.command_buffer.pushVertexUniformData(0, std.mem.asBytes(&sky_mvp));
+                sky_mesh.draw(renderpass);
+
                 renderpass.bindGraphicsPipeline(pipeline);
 
                 // 4. Bind Texture and Sampler
@@ -91,7 +148,7 @@ pub fn main() !void {
                 const mat = camera.getDescriptorMatrix(za.Vec2.new(@floatFromInt(width), @floatFromInt(height)));
                 frame.command_buffer.pushVertexUniformData(0, std.mem.asBytes(&mat));
 
-                cube_mesh.draw(renderpass);
+                mesh.draw(renderpass);
 
                 renderpass.end();
             }

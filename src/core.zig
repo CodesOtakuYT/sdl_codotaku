@@ -193,15 +193,16 @@ pub fn loadShader(
     });
 }
 
+pub const Vertex = struct {
+    position: za.Vec3,
+    uv: za.Vec2,
+};
+
 const PipelineInfo = struct {
     vertex_shader: sdl3.gpu.Shader,
     fragment_shader: sdl3.gpu.Shader,
     depth_test: bool = false,
-};
-
-pub const Vertex = struct {
-    position: za.Vec3,
-    uv: za.Vec2,
+    depth_write: bool = true, // Added this field
 };
 
 pub fn createPipeline(self: *Self, info: PipelineInfo) !sdl3.gpu.GraphicsPipeline {
@@ -210,9 +211,9 @@ pub fn createPipeline(self: *Self, info: PipelineInfo) !sdl3.gpu.GraphicsPipelin
         .fragment_shader = info.fragment_shader,
         .depth_stencil_state = if (info.depth_test) sdl3.gpu.DepthStencilState{
             .enable_depth_test = true,
-            .enable_depth_write = true,
-            .compare = .less,
-            .write_mask = 0xFF,
+            .enable_depth_write = info.depth_write, // Use the new field here
+            .compare = .less_or_equal, // .less_equal is better for skyboxes
+            .write_mask = if (info.depth_write) 0xFF else 0,
         } else .{},
         .target_info = sdl3.gpu.GraphicsPipelineTargetInfo{
             .color_target_descriptions = &.{
@@ -321,12 +322,13 @@ pub fn makeUpload(comptime T: type, data: []const T, usage: sdl3.gpu.BufferUsage
     };
 }
 
-pub fn createTexture(self: *Self, w: u32, h: u32, format: sdl3.gpu.TextureFormat) !sdl3.gpu.Texture {
+pub fn createTexture(self: *Self, w: u32, h: u32, format: sdl3.gpu.TextureFormat, layers: u32) !sdl3.gpu.Texture {
     return self.device.createTexture(.{
+        .texture_type = if (layers == 6) .cube else if (layers > 1) .two_dimensional_array else .two_dimensional,
         .format = format,
         .width = w,
         .height = h,
-        .layer_count_or_depth = 1,
+        .layer_count_or_depth = layers,
         .num_levels = 1,
         .usage = .{ .sampler = true },
     });
@@ -402,7 +404,7 @@ pub fn loadTexturePNG(self: *Self, path: [:0]const u8) !sdl3.gpu.Texture {
     const total_size = row_size * height;
 
     // 3. Create the GPU Texture
-    const texture = try self.createTexture(width, height, .r8g8b8a8_unorm);
+    const texture = try self.createTexture(width, height, .r8g8b8a8_unorm, 1);
     errdefer self.device.releaseTexture(texture);
 
     // 4. Prepare the pixel data for upload
@@ -422,6 +424,80 @@ pub fn loadTexturePNG(self: *Self, path: [:0]const u8) !sdl3.gpu.Texture {
 
     // 5. Upload to GPU using our existing helper
     try self.uploadTexture(texture, tight_pixels, width, height);
+
+    return texture;
+}
+
+pub fn loadCubemapPNG(self: *Self, paths: [6][:0]const u8) !sdl3.gpu.Texture {
+    var surfaces: [6]sdl3.surface.Surface = undefined;
+    var converted: [6]sdl3.surface.Surface = undefined;
+
+    // 1. Load and convert all 6 faces
+    for (paths, 0..) |path, i| {
+        surfaces[i] = try sdl3.surface.Surface.initFromPngFile(path);
+        converted[i] = try surfaces[i].convertFormat(.array_rgba_32);
+        surfaces[i].deinit();
+    }
+    defer for (converted) |s| s.deinit();
+
+    const width: u32 = @intCast(converted[0].value.w);
+    const height: u32 = @intCast(converted[0].value.h);
+    const bpp: u32 = 4;
+    const face_size = width * height * bpp;
+    const total_size = face_size * 6;
+
+    // 2. Create the Cube Texture
+    const texture = try self.createTexture(width, height, .r8g8b8a8_unorm, 6);
+    errdefer self.device.releaseTexture(texture);
+
+    // 3. Prepare contiguous memory for all faces (removing SDL pitch/padding)
+    const all_faces_pixels = try self.allocator.alloc(u8, total_size);
+    defer self.allocator.free(all_faces_pixels);
+
+    for (converted, 0..) |face, i| {
+        const src_pixels: [*]const u8 = @ptrCast(face.value.pixels.?);
+        const pitch: usize = @intCast(face.value.pitch);
+        const face_offset = i * face_size;
+        const row_size = width * bpp;
+
+        for (0..height) |y| {
+            const src_offset = y * pitch;
+            const dst_offset = face_offset + (y * row_size);
+            @memcpy(all_faces_pixels[dst_offset .. dst_offset + row_size], src_pixels[src_offset .. src_offset + row_size]);
+        }
+    }
+
+    // 4. Upload to GPU
+    const transfer_buffer = try self.device.createTransferBuffer(.{
+        .size = @intCast(total_size),
+        .usage = .upload,
+    });
+    defer self.device.releaseTransferBuffer(transfer_buffer);
+
+    const mapped = try self.device.mapTransferBuffer(transfer_buffer, false);
+    @memcpy(mapped[0..total_size], all_faces_pixels);
+    self.device.unmapTransferBuffer(transfer_buffer);
+
+    const cmd = try self.device.acquireCommandBuffer();
+    {
+        const copy_pass = cmd.beginCopyPass();
+        defer copy_pass.end();
+
+        // SDL3 GPU handles cubemap uploads by treating layers as the 3rd dimension or array index
+        for (0..6) |i| {
+            copy_pass.uploadToTexture(.{
+                .transfer_buffer = transfer_buffer,
+                .offset = @intCast(i * face_size),
+            }, .{
+                .texture = texture,
+                .width = width,
+                .height = height,
+                .depth = 1,
+                .layer = @intCast(i), // Target the specific face
+            }, false);
+        }
+    }
+    try cmd.submit();
 
     return texture;
 }
