@@ -9,15 +9,16 @@ width: u32,
 height: u32,
 
 /// Basic initialization for a raw GPU texture
-pub fn init(core: *Core, w: u32, h: u32, format: sdl3.gpu.TextureFormat, layers: u32) !Self {
+pub fn init(core: *Core, w: u32, h: u32, format: sdl3.gpu.TextureFormat, layers: u32, usage: sdl3.gpu.TextureUsageFlags) !Self {
     const handle = try core.device.createTexture(.{
         .texture_type = if (layers == 6) .cube else if (layers > 1) .two_dimensional_array else .two_dimensional,
         .format = format,
-        .width = w,
-        .height = h,
+        .width = @max(w, 1),
+        .height = @max(h, 1),
         .layer_count_or_depth = layers,
         .num_levels = 1,
-        .usage = .{ .sampler = true },
+        .sample_count = .no_multisampling,
+        .usage = usage,
     });
 
     return .{
@@ -27,16 +28,27 @@ pub fn init(core: *Core, w: u32, h: u32, format: sdl3.gpu.TextureFormat, layers:
     };
 }
 
+/// Specialized initializer for Depth Textures
+pub fn initDepth(core: *Core, w: u32, h: u32) !Self {
+    return try Self.init(core, w, h, .depth16_unorm, 1, .{ .depth_stencil_target = true });
+}
+
+/// Factory for Samplers
+pub fn createSampler(core: *Core, info: sdl3.gpu.SamplerCreateInfo) !sdl3.gpu.Sampler {
+    return try core.device.createSampler(info);
+}
+
 pub fn deinit(self: Self, core: *Core) void {
     core.device.releaseTexture(self.handle);
 }
+
+// --- Loading Logic ---
 
 /// Loads a standard 2D texture from a PNG file
 pub fn loadPNG(core: *Core, path: [:0]const u8) !Self {
     const raw_surface = try sdl3.surface.Surface.initFromPngFile(path);
     defer raw_surface.deinit();
 
-    // Convert to RGBA32 for GPU compatibility (.r8g8b8a8_unorm)
     const surface = try raw_surface.convertFormat(.array_rgba_32);
     defer surface.deinit();
 
@@ -46,10 +58,9 @@ pub fn loadPNG(core: *Core, path: [:0]const u8) !Self {
     const row_size = w * bpp;
     const total_size = row_size * h;
 
-    const texture = try Self.init(core, w, h, .r8g8b8a8_unorm, 1);
+    const texture = try Self.init(core, w, h, .r8g8b8a8_unorm, 1, .{ .sampler = true });
     errdefer texture.deinit(core);
 
-    // Pack pixels (remove SDL surface pitch padding)
     const tight_pixels = try core.allocator.alloc(u8, total_size);
     defer core.allocator.free(tight_pixels);
 
@@ -85,7 +96,7 @@ pub fn loadCubemap(core: *Core, paths: [6][:0]const u8) !Self {
     const face_size = w * h * bpp;
     const total_size = face_size * 6;
 
-    const texture = try Self.init(core, w, h, .r8g8b8a8_unorm, 6);
+    const texture = try Self.init(core, w, h, .r8g8b8a8_unorm, 6, .{ .sampler = true });
     errdefer texture.deinit(core);
 
     const all_faces_pixels = try core.allocator.alloc(u8, total_size);
@@ -105,7 +116,6 @@ pub fn loadCubemap(core: *Core, paths: [6][:0]const u8) !Self {
         }
     }
 
-    // Direct upload for cubemaps (iterating through layers)
     const transfer_buffer = try core.device.createTransferBuffer(.{
         .size = @intCast(total_size),
         .usage = .upload,
@@ -139,7 +149,6 @@ pub fn loadCubemap(core: *Core, paths: [6][:0]const u8) !Self {
     return texture;
 }
 
-/// Internal helper for single-layer uploads
 fn upload(self: Self, core: *Core, pixels: []const u8) !void {
     const transfer_buffer = try core.device.createTransferBuffer(.{
         .size = @intCast(pixels.len),

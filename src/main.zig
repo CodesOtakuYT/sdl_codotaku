@@ -16,7 +16,7 @@ pub fn main() !void {
     _ = try sdl3.setMemoryFunctionsByAllocator(allocator);
 
     var core = try Core.init(.{
-        .title = "SDL Codotaku - Refactored Engine",
+        .title = "SDL Codotaku - Final Refactor",
         .width = 800,
         .height = 600,
         .debug_mode = true,
@@ -30,10 +30,12 @@ pub fn main() !void {
 
     // --- Resources: Camera & Buffers ---
     var camera = Camera.init(za.Vec3.new(1.8, 1.8, 1.8), za.Vec3.new(0.0, 0.5, 0.0), za.Vec3.up());
-    var depth_texture = try core.createDepthTexture(width, height);
-    defer core.device.releaseTexture(depth_texture);
 
-    const sampler = try core.createSampler(.{
+    // Now using Texture abstraction for Depth
+    var depth_texture = try Texture.initDepth(&core, width, height);
+    defer depth_texture.deinit(&core);
+
+    const sampler = try Texture.createSampler(&core, .{
         .min_filter = .nearest,
         .mag_filter = .nearest,
         .mipmap_mode = .nearest,
@@ -43,7 +45,7 @@ pub fn main() !void {
     });
     defer core.device.releaseSampler(sampler);
 
-    // --- Resources: Pipelines (Now encapsulating Shaders) ---
+    // --- Resources: Pipelines ---
     const main_pipeline = try Pipeline.init(&core, .{
         .vert_spec = .{ .filename = "TexturedQuadWithMatrix.vert", .uniform_buffer_count = 1 },
         .frag_spec = .{ .filename = "TexturedQuad.frag", .sampler_count = 1 },
@@ -87,7 +89,8 @@ pub fn main() !void {
         camera.update(dt);
 
         if (try core.beginFrame()) |frame| {
-            const renderpass = try frame.renderpass(.{ .r = 0.1, .g = 0.1, .b = 0.1, .a = 1.0 }, depth_texture);
+            // Using depth_texture.handle since frame.renderpass expects the raw GPU handle
+            const renderpass = try frame.renderpass(.{ .r = 0.1, .g = 0.1, .b = 0.1, .a = 1.0 }, depth_texture.handle);
 
             // 1. Draw Skybox
             sky_pipeline.bind(renderpass);
@@ -97,7 +100,7 @@ pub fn main() !void {
             var view = camera.getViewMatrix();
             view.data[3][0] = 0;
             view.data[3][1] = 0;
-            view.data[3][2] = 0; // Center on camera
+            view.data[3][2] = 0; // Lock skybox to camera
 
             const sky_mvp = za.Mat4.mul(proj, view);
             frame.command_buffer.pushVertexUniformData(0, std.mem.asBytes(&sky_mvp));
@@ -122,8 +125,10 @@ pub fn main() !void {
                 .window_resized => |ev| {
                     width = @intCast(ev.width);
                     height = @intCast(ev.height);
-                    core.device.releaseTexture(depth_texture);
-                    depth_texture = try core.createDepthTexture(width, height);
+
+                    // Cleanup and recreate depth through the Texture module
+                    depth_texture.deinit(&core);
+                    depth_texture = try Texture.initDepth(&core, width, height);
                 },
                 else => {},
             }

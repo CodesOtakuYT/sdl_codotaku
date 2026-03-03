@@ -154,25 +154,3 @@ pub fn beginFrame(self: *Self) !?Frame {
     }
     return null;
 }
-
-// --- Lower-Level GPU Factory Helpers ---
-
-pub fn createDepthTexture(self: *Self, width: u32, height: u32) !sdl3.gpu.Texture {
-    // Prevent SDL3 assertion if window is 0x0
-    const w = @max(width, 1);
-    const h = @max(height, 1);
-
-    return self.device.createTexture(.{
-        .width = w,
-        .height = h,
-        .layer_count_or_depth = 1,
-        .num_levels = 1,
-        .sample_count = .no_multisampling,
-        .format = .depth16_unorm,
-        .usage = .{ .depth_stencil_target = true },
-    });
-}
-
-pub fn createSampler(self: *Self, info: sdl3.gpu.SamplerCreateInfo) !sdl3.gpu.Sampler {
-    return try self.device.createSampler(info);
-}
