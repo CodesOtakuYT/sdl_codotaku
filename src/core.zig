@@ -201,7 +201,7 @@ const PipelineInfo = struct {
 
 pub const Vertex = struct {
     position: za.Vec3,
-    color: za.GenericVector(4, u8),
+    uv: za.Vec2,
 };
 
 pub fn createPipeline(self: *Self, info: PipelineInfo) !sdl3.gpu.GraphicsPipeline {
@@ -239,9 +239,9 @@ pub fn createPipeline(self: *Self, info: PipelineInfo) !sdl3.gpu.GraphicsPipelin
                 },
                 sdl3.gpu.VertexAttribute{
                     .buffer_slot = 0,
-                    .format = .u8x4_normalized,
+                    .format = .f32x2,
                     .location = 1,
-                    .offset = @offsetOf(Vertex, "color"),
+                    .offset = @offsetOf(Vertex, "uv"),
                 },
             },
         },
@@ -321,6 +321,17 @@ pub fn makeUpload(comptime T: type, data: []const T, usage: sdl3.gpu.BufferUsage
     };
 }
 
+pub fn createTexture(self: *Self, w: u32, h: u32, format: sdl3.gpu.TextureFormat) !sdl3.gpu.Texture {
+    return self.device.createTexture(.{
+        .format = format,
+        .width = w,
+        .height = h,
+        .layer_count_or_depth = 1,
+        .num_levels = 1,
+        .usage = .{ .sampler = true },
+    });
+}
+
 pub fn createDepthTexture(self: *Self, width: u32, height: u32) !sdl3.gpu.Texture {
     return self.device.createTexture(.{
         .width = width,
@@ -331,4 +342,86 @@ pub fn createDepthTexture(self: *Self, width: u32, height: u32) !sdl3.gpu.Textur
         .format = .depth16_unorm,
         .usage = .{ .depth_stencil_target = true },
     });
+}
+
+pub fn createSampler(self: *Self, info: sdl3.gpu.SamplerCreateInfo) !sdl3.gpu.Sampler {
+    return try self.device.createSampler(info);
+}
+
+pub fn uploadTexture(self: *Self, texture: sdl3.gpu.Texture, pixels: []const u8, width: u32, height: u32) !void {
+    // 1. Create a transfer buffer large enough for the pixel data
+    const transfer_buffer = try self.device.createTransferBuffer(.{
+        .size = @intCast(pixels.len),
+        .usage = .upload,
+    });
+    defer self.device.releaseTransferBuffer(transfer_buffer);
+
+    // 2. Map the buffer and copy the CPU pixel data into it
+    const mapped_data = try self.device.mapTransferBuffer(transfer_buffer, false);
+    @memcpy(mapped_data[0..pixels.len], pixels);
+    self.device.unmapTransferBuffer(transfer_buffer);
+
+    // 3. Acquire a command buffer to perform the copy
+    const command_buffer = try self.device.acquireCommandBuffer();
+
+    // 4. Record the copy command from the transfer buffer to the texture
+    {
+        const copy_pass = command_buffer.beginCopyPass();
+        defer copy_pass.end();
+
+        copy_pass.uploadToTexture(.{
+            .transfer_buffer = transfer_buffer,
+            .offset = 0,
+        }, .{
+            .texture = texture,
+            .width = width,
+            .height = height,
+            .depth = 1,
+        }, false);
+    }
+
+    // 5. Submit and wait for the GPU to finish the transfer
+    try command_buffer.submit();
+}
+
+pub fn loadTexturePNG(self: *Self, path: [:0]const u8) !sdl3.gpu.Texture {
+    // 1. Load the image into an SDL Surface
+    // SDL3's loadSurface is the equivalent of the old IMG_Load or SDL_LoadPNG
+    const raw_surface = try sdl3.surface.Surface.initFromPngFile(path);
+    defer raw_surface.deinit();
+
+    // 2. Convert to RGBA32 to ensure 4 bytes per pixel (R, G, B, A)
+    // This matches the .r8g8b8a8_unorm GPU format
+    const surface = try raw_surface.convertFormat(.array_rgba_32);
+    defer surface.deinit();
+
+    const width: u32 = @intCast(surface.value.w);
+    const height: u32 = @intCast(surface.value.h);
+    const bpp: u32 = 4;
+    const row_size = width * bpp;
+    const total_size = row_size * height;
+
+    // 3. Create the GPU Texture
+    const texture = try self.createTexture(width, height, .r8g8b8a8_unorm);
+    errdefer self.device.releaseTexture(texture);
+
+    // 4. Prepare the pixel data for upload
+    // We allocate a temporary buffer to ensure pixels are tightly packed
+    // (removing any SDL pitch/padding)
+    const tight_pixels = try self.allocator.alloc(u8, total_size);
+    defer self.allocator.free(tight_pixels);
+
+    const src_pixels: [*]const u8 = @ptrCast(surface.value.pixels.?);
+    const pitch: usize = @intCast(surface.value.pitch);
+
+    for (0..height) |y| {
+        const src_offset = y * pitch;
+        const dst_offset = y * row_size;
+        @memcpy(tight_pixels[dst_offset .. dst_offset + row_size], src_pixels[src_offset .. src_offset + row_size]);
+    }
+
+    // 5. Upload to GPU using our existing helper
+    try self.uploadTexture(texture, tight_pixels, width, height);
+
+    return texture;
 }
