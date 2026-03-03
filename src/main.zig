@@ -1,14 +1,15 @@
+const std = @import("std");
 const Core = @import("core.zig");
 const sdl3 = Core.sdl3;
-const std = @import("std");
 const za = Core.za;
+
 const Camera = @import("camera.zig");
 const Mesh = @import("mesh.zig");
 const Texture = @import("texture.zig");
-const Shader = @import("shader.zig");
 const Pipeline = @import("pipeline.zig");
 
 pub fn main() !void {
+    // --- Setup ---
     var debug_allocator = std.heap.DebugAllocator(.{}).init;
     defer std.debug.assert(debug_allocator.deinit() == .ok);
     const allocator = debug_allocator.allocator();
@@ -27,8 +28,8 @@ pub fn main() !void {
     var width: u32 = @intCast(window_size.@"0");
     var height: u32 = @intCast(window_size.@"1");
 
+    // --- Resources: Camera & Buffers ---
     var camera = Camera.init(za.Vec3.new(1.8, 1.8, 1.8), za.Vec3.new(0.0, 0.5, 0.0), za.Vec3.up());
-
     var depth_texture = try core.createDepthTexture(width, height);
     defer core.device.releaseTexture(depth_texture);
 
@@ -42,34 +43,23 @@ pub fn main() !void {
     });
     defer core.device.releaseSampler(sampler);
 
-    // --- Main Scene Pipeline ---
-    const main_vert = try Shader.init(&core, .{ .filename = "TexturedQuadWithMatrix.vert", .uniform_buffer_count = 1 });
-    const main_frag = try Shader.init(&core, .{ .filename = "TexturedQuad.frag", .sampler_count = 1 });
-    defer main_vert.deinit(&core);
-    defer main_frag.deinit(&core);
-
+    // --- Resources: Pipelines (Now encapsulating Shaders) ---
     const main_pipeline = try Pipeline.init(&core, .{
-        .vert = main_vert,
-        .frag = main_frag,
+        .vert_spec = .{ .filename = "TexturedQuadWithMatrix.vert", .uniform_buffer_count = 1 },
+        .frag_spec = .{ .filename = "TexturedQuad.frag", .sampler_count = 1 },
         .depth_test = true,
     });
     defer main_pipeline.deinit(&core);
 
-    // --- Skybox Pipeline ---
-    const sky_vert = try Shader.init(&core, .{ .filename = "Skybox.vert", .uniform_buffer_count = 1 });
-    const sky_frag = try Shader.init(&core, .{ .filename = "Skybox.frag", .sampler_count = 1 });
-    defer sky_vert.deinit(&core);
-    defer sky_frag.deinit(&core);
-
     const sky_pipeline = try Pipeline.init(&core, .{
-        .vert = sky_vert,
-        .frag = sky_frag,
+        .vert_spec = .{ .filename = "Skybox.vert", .uniform_buffer_count = 1 },
+        .frag_spec = .{ .filename = "Skybox.frag", .sampler_count = 1 },
         .depth_test = true,
         .depth_write = false,
     });
     defer sky_pipeline.deinit(&core);
 
-    // --- Resources ---
+    // --- Resources: Assets ---
     const texture = try Texture.loadPNG(&core, "Content/Images/viking_room.png");
     defer texture.deinit(&core);
 
@@ -86,33 +76,35 @@ pub fn main() !void {
     var sky_mesh = try Mesh.initCube(&core);
     defer sky_mesh.deinit(&core);
 
+    // --- Main Loop ---
     var start_ticks = sdl3.timer.getMillisecondsSinceInit();
     var quit = false;
     while (!quit) {
         const current_ticks = sdl3.timer.getMillisecondsSinceInit();
         const dt = @as(f32, @floatFromInt(current_ticks - start_ticks)) / 1000.0;
         start_ticks = current_ticks;
+
         camera.update(dt);
 
         if (try core.beginFrame()) |frame| {
             const renderpass = try frame.renderpass(.{ .r = 0.1, .g = 0.1, .b = 0.1, .a = 1.0 }, depth_texture);
 
             // 1. Draw Skybox
-            renderpass.bindGraphicsPipeline(sky_pipeline.handle);
+            sky_pipeline.bind(renderpass);
             renderpass.bindFragmentSamplers(0, &.{.{ .texture = skybox_texture.handle, .sampler = sampler }});
 
             const proj = camera.getProjMatrix(za.Vec2.new(@floatFromInt(width), @floatFromInt(height)));
             var view = camera.getViewMatrix();
             view.data[3][0] = 0;
             view.data[3][1] = 0;
-            view.data[3][2] = 0; // Remove translation
+            view.data[3][2] = 0; // Center on camera
 
             const sky_mvp = za.Mat4.mul(proj, view);
             frame.command_buffer.pushVertexUniformData(0, std.mem.asBytes(&sky_mvp));
             sky_mesh.draw(renderpass);
 
             // 2. Draw Scene
-            renderpass.bindGraphicsPipeline(main_pipeline.handle);
+            main_pipeline.bind(renderpass);
             renderpass.bindFragmentSamplers(0, &.{.{ .texture = texture.handle, .sampler = sampler }});
 
             const mat = camera.getDescriptorMatrix(za.Vec2.new(@floatFromInt(width), @floatFromInt(height)));

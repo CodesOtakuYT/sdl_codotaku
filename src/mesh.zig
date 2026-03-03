@@ -4,7 +4,7 @@ const za = Core.za;
 const sdl3 = Core.sdl3;
 const obj = @import("obj");
 const Buffer = @import("buffer.zig"); // Import our new abstraction
-const Vertex = Core.Vertex;
+const Vertex = @import("vertex.zig").Vertex;
 
 const Self = @This();
 
@@ -29,7 +29,7 @@ pub fn init(core: *Core, vertices: []Vertex, indices: []u32) !Self {
 }
 
 pub fn initCube(core: *Core) !Self {
-    var vertices = [_]Core.Vertex{
+    var vertices = [_]Vertex{
         // Front Face (Z+)
         .{ .position = za.Vec3.new(-0.5, 0.5, 0.5), .uv = za.Vec2.new(0, 0) },
         .{ .position = za.Vec3.new(0.5, 0.5, 0.5), .uv = za.Vec2.new(1, 0) },
