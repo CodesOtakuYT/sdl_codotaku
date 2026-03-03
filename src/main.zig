@@ -62,10 +62,10 @@ pub fn main() !void {
     };
     defer core.device.releaseGraphicsPipeline(pipeline);
 
-    const texture = try core.loadTexturePNG("Content/Images/armadillo.png");
+    const texture = try core.loadTexturePNG("Content/Images/viking_room.png");
     defer core.device.releaseTexture(texture);
 
-    var cube_mesh = try Mesh.initCube(&core);
+    var cube_mesh = try Mesh.initObj(&core, @embedFile("viking_room.obj"));
     defer cube_mesh.deinit(&core);
 
     var start_ticks = sdl3.timer.getMillisecondsSinceInit();
