@@ -4,20 +4,23 @@ pub const za = @import("zalgebra");
 
 const Self = @This();
 
+// --- Hardware & OS Context ---
 allocator: std.mem.Allocator,
 device: sdl3.gpu.Device,
 window: sdl3.video.Window,
+
+// --- Shader Backend Metadata ---
 shaders_base_path: []const u8,
 shader_backend: ShaderBackend,
 
-const ShaderBackend = struct {
+pub const ShaderBackend = struct {
     format: sdl3.gpu.ShaderFormatFlags,
     subdir: []const u8,
     ext: []const u8,
     entrypoint: [:0]const u8,
 };
 
-const Info = struct {
+pub const Info = struct {
     title: [:0]const u8,
     width: usize,
     height: usize,
@@ -27,8 +30,7 @@ const Info = struct {
 };
 
 pub fn init(info: Info) !Self {
-    const init_flags = sdl3.InitFlags{ .video = true };
-    try sdl3.init(init_flags);
+    try sdl3.init(.{ .video = true });
     errdefer sdl3.shutdown();
 
     const device = try sdl3.gpu.Device.init(.{
@@ -46,7 +48,6 @@ pub fn init(info: Info) !Self {
     try device.claimWindow(window);
 
     const backend_formats = device.getShaderFormats();
-
     const shader_backend: ShaderBackend = if (backend_formats.spirv)
         .{ .format = .{ .spirv = true }, .subdir = "SPIRV", .ext = ".spv", .entrypoint = "main" }
     else if (backend_formats.msl)
@@ -57,7 +58,6 @@ pub fn init(info: Info) !Self {
         return error.UnrecognizedShaderFormat;
 
     const base_path = try sdl3.filesystem.getBasePath();
-
     const shaders_base_path = try std.fmt.allocPrint(
         info.allocator,
         "{s}Content/Shaders/Compiled/{s}/",
@@ -88,7 +88,9 @@ pub fn poll() ?sdl3.events.Event {
     return sdl3.events.poll();
 }
 
-const Frame = struct {
+// --- Frame Management ---
+
+pub const Frame = struct {
     command_buffer: sdl3.gpu.CommandBuffer,
     texture: sdl3.gpu.Texture,
     width: u32,
@@ -110,149 +112,59 @@ const Frame = struct {
             .stencil_store = .store,
         } else null;
 
-        const render_pass = self.command_buffer.beginRenderPass(&.{sdl3.gpu.ColorTargetInfo{
+        const rp = self.command_buffer.beginRenderPass(&.{.{
             .texture = self.texture,
             .clear_color = clear_color,
             .load = .clear,
             .store = .store,
-        }}, if (depth_info) |di| di else null);
+        }}, depth_info);
 
-        render_pass.setViewport(.{ .max_depth = 1, .region = .{
-            .x = 0,
-            .y = 0,
-            .w = @floatFromInt(self.width),
-            .h = @floatFromInt(self.height),
-        } });
-        render_pass.setScissor(.{
+        rp.setViewport(.{
+            .max_depth = 1.0,
+            .region = .{
+                .x = 0,
+                .y = 0,
+                .w = @floatFromInt(self.width),
+                .h = @floatFromInt(self.height),
+            },
+        });
+
+        rp.setScissor(.{
             .x = 0,
             .y = 0,
             .w = @intCast(self.width),
             .h = @intCast(self.height),
         });
-        return render_pass;
+
+        return rp;
     }
 };
 
 pub fn beginFrame(self: *Self) !?Frame {
-    const command_buffer = try self.device.acquireCommandBuffer();
-
-    const swapchain = try command_buffer.waitAndAcquireSwapchainTexture(self.window);
+    const cb = try self.device.acquireCommandBuffer();
+    const swapchain = try cb.waitAndAcquireSwapchainTexture(self.window);
 
     if (swapchain.@"0") |texture| {
         return Frame{
-            .command_buffer = command_buffer,
+            .command_buffer = cb,
             .texture = texture,
             .width = swapchain.@"1",
             .height = swapchain.@"2",
         };
     }
-
     return null;
 }
 
-const ShaderInfo = struct {
-    filename: [:0]const u8,
-    sampler_count: u32 = 0,
-    uniform_buffer_count: u32 = 0,
-    storage_buffer_count: u32 = 0,
-    storage_texture_count: u32 = 0,
-};
-
-pub fn loadShader(
-    self: *Self,
-    info: ShaderInfo,
-) !sdl3.gpu.Shader {
-    const stage: sdl3.gpu.ShaderStage = if (std.mem.indexOf(u8, info.filename, ".vert") != null)
-        .vertex
-    else if (std.mem.indexOf(u8, info.filename, ".frag") != null)
-        .fragment
-    else
-        return error.InvalidShaderStage;
-
-    const shader_path = try std.fmt.allocPrintSentinel(
-        self.allocator,
-        "{s}{s}{s}",
-        .{ self.shaders_base_path, info.filename, self.shader_backend.ext },
-        0,
-    );
-    defer self.allocator.free(shader_path);
-
-    errdefer std.debug.print("{s}", .{sdl3.errors.get().?});
-    const code = try sdl3.io_stream.loadFile(shader_path);
-    defer sdl3.free(code);
-
-    return self.device.createShader(.{
-        .code = code,
-        .entry_point = self.shader_backend.entrypoint,
-        .format = self.shader_backend.format,
-        .stage = stage,
-        .num_samplers = info.sampler_count,
-        .num_uniform_buffers = info.uniform_buffer_count,
-        .num_storage_buffers = info.storage_buffer_count,
-        .num_storage_textures = info.storage_texture_count,
-    });
-}
-
-pub const Vertex = struct {
-    position: za.Vec3,
-    uv: za.Vec2,
-};
-
-const PipelineInfo = struct {
-    vertex_shader: sdl3.gpu.Shader,
-    fragment_shader: sdl3.gpu.Shader,
-    depth_test: bool = false,
-    depth_write: bool = true, // Added this field
-};
-
-pub fn createPipeline(self: *Self, info: PipelineInfo) !sdl3.gpu.GraphicsPipeline {
-    return self.device.createGraphicsPipeline(.{
-        .vertex_shader = info.vertex_shader,
-        .fragment_shader = info.fragment_shader,
-        .depth_stencil_state = if (info.depth_test) sdl3.gpu.DepthStencilState{
-            .enable_depth_test = true,
-            .enable_depth_write = info.depth_write, // Use the new field here
-            .compare = .less_or_equal, // .less_equal is better for skyboxes
-            .write_mask = if (info.depth_write) 0xFF else 0,
-        } else .{},
-        .target_info = sdl3.gpu.GraphicsPipelineTargetInfo{
-            .color_target_descriptions = &.{
-                sdl3.gpu.ColorTargetDescription{
-                    .format = try self.device.getSwapchainTextureFormat(self.window),
-                },
-            },
-            .depth_stencil_format = if (info.depth_test) .depth16_unorm else null,
-        },
-        .vertex_input_state = sdl3.gpu.VertexInputState{
-            .vertex_buffer_descriptions = &.{
-                sdl3.gpu.VertexBufferDescription{
-                    .input_rate = .vertex,
-                    .slot = 0,
-                    .pitch = @sizeOf(Vertex),
-                },
-            },
-            .vertex_attributes = &.{
-                sdl3.gpu.VertexAttribute{
-                    .buffer_slot = 0,
-                    .format = .f32x3,
-                    .location = 0,
-                    .offset = @offsetOf(Vertex, "position"),
-                },
-                sdl3.gpu.VertexAttribute{
-                    .buffer_slot = 0,
-                    .format = .f32x2,
-                    .location = 1,
-                    .offset = @offsetOf(Vertex, "uv"),
-                },
-            },
-        },
-    });
-}
+// --- Lower-Level GPU Factory Helpers ---
 
 pub fn createDepthTexture(self: *Self, width: u32, height: u32) !sdl3.gpu.Texture {
+    // Prevent SDL3 assertion if window is 0x0
+    const w = @max(width, 1);
+    const h = @max(height, 1);
+
     return self.device.createTexture(.{
-        .width = width,
-        .height = height,
+        .width = w,
+        .height = h,
         .layer_count_or_depth = 1,
         .num_levels = 1,
         .sample_count = .no_multisampling,
