@@ -4,6 +4,7 @@ const std = @import("std");
 const za = Core.za;
 const Camera = @import("camera.zig");
 const Mesh = @import("mesh.zig");
+const Texture = @import("texture.zig");
 
 pub fn main() !void {
     var debug_allocator = std.heap.DebugAllocator(.{}).init;
@@ -86,10 +87,10 @@ pub fn main() !void {
     };
     defer core.device.releaseGraphicsPipeline(skybox_pipeline);
 
-    const texture = try core.loadTexturePNG("Content/Images/viking_room.png");
-    defer core.device.releaseTexture(texture);
+    const texture = try Texture.loadPNG(&core, "Content/Images/viking_room.png");
+    defer texture.deinit(&core);
 
-    const skybox_texture = try core.loadCubemapPNG(.{
+    const skybox_texture = try Texture.loadCubemap(&core, .{
         "Content/Images/skybox/posx.png", // +X
         "Content/Images/skybox/negx.png", // -X
         "Content/Images/skybox/posy.png", // +Y
@@ -97,7 +98,7 @@ pub fn main() !void {
         "Content/Images/skybox/posz.png", // +Z
         "Content/Images/skybox/negz.png", // -Z
     });
-    defer core.device.releaseTexture(skybox_texture);
+    defer skybox_texture.deinit(&core);
 
     var mesh = try Mesh.initObj(&core, @embedFile("viking_room.obj"));
     defer mesh.deinit(&core);
@@ -119,7 +120,7 @@ pub fn main() !void {
 
                 renderpass.bindGraphicsPipeline(skybox_pipeline);
                 renderpass.bindFragmentSamplers(0, &.{.{
-                    .texture = skybox_texture,
+                    .texture = skybox_texture.handle,
                     .sampler = sampler,
                 }});
 
@@ -141,7 +142,7 @@ pub fn main() !void {
 
                 // 4. Bind Texture and Sampler
                 renderpass.bindFragmentSamplers(0, &.{.{
-                    .texture = texture,
+                    .texture = texture.handle,
                     .sampler = sampler,
                 }});
 
