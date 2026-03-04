@@ -39,16 +39,16 @@ pub fn main() !void {
     // Request the scene texture
     try assets.requestTexture("Content/Images/viking_room.png");
 
+    // Request Meshes
+    try assets.requestMeshObj("viking_room", @embedFile("viking_room.obj"));
+    try assets.requestMeshCube("sky_cube");
+
     // Request the Cubemap correctly
     try assets.requestCubemap("skybox", .{
         "Content/Images/skybox/posx.png", "Content/Images/skybox/negx.png",
         "Content/Images/skybox/posy.png", "Content/Images/skybox/negy.png",
         "Content/Images/skybox/posz.png", "Content/Images/skybox/negz.png",
     });
-
-    // Request Meshes
-    try assets.requestMeshObj("viking_room", @embedFile("viking_room.obj"));
-    try assets.requestMeshCube("sky_cube");
 
     // --- 3. Pipeline & Graphics State ---
     var camera = Camera.init(za.Vec3.new(1.8, 1.8, 1.8), za.Vec3.new(0.0, 0.5, 0.0), za.Vec3.up());
