@@ -19,7 +19,7 @@ pub fn main() !void {
     _ = try sdl3.setMemoryFunctionsByAllocator(allocator);
 
     var core = try Core.init(.{
-        .title = "SDL Codotaku - Asset Manager Refactor",
+        .title = "SDL Codotaku - Async Skybox Fixed",
         .width = 800,
         .height = 600,
         .debug_mode = true,
@@ -32,26 +32,23 @@ pub fn main() !void {
     var width: u32 = @intCast(window_size.@"0");
     var height: u32 = @intCast(window_size.@"1");
 
-    // --- 2. Asset Manager & Loading ---
-    var assets = AssetManager.init(core, allocator);
-    // assets.deinit() will now handle releasing all GPU textures/meshes automatically
+    // --- 2. Asset Manager & Async Requests ---
+    var assets = try AssetManager.init(core, allocator);
     defer assets.deinit();
 
-    var upload = try Upload.begin(core);
+    // Request the scene texture
+    try assets.requestTexture("Content/Images/viking_room.png");
 
-    // Assets are loaded via the manager.
-    // Internally, it loads CPU data, uploads to GPU, then frees CPU data.
-    const tex_viking = try assets.loadTexture(&upload, "Content/Images/viking_room.png");
-    const tex_sky = try assets.loadCubemap(&upload, "skybox", .{
+    // Request the Cubemap correctly
+    try assets.requestCubemap("skybox", .{
         "Content/Images/skybox/posx.png", "Content/Images/skybox/negx.png",
         "Content/Images/skybox/posy.png", "Content/Images/skybox/negy.png",
         "Content/Images/skybox/posz.png", "Content/Images/skybox/negz.png",
     });
 
-    const mesh_viking = try assets.loadMeshObj(&upload, "viking_room", @embedFile("viking_room.obj"));
-    const mesh_sky = try assets.loadMeshCube(&upload, "sky_cube");
-
-    try upload.end();
+    // Request Meshes
+    try assets.requestMeshObj("viking_room", @embedFile("viking_room.obj"));
+    try assets.requestMeshCube("sky_cube");
 
     // --- 3. Pipeline & Graphics State ---
     var camera = Camera.init(za.Vec3.new(1.8, 1.8, 1.8), za.Vec3.new(0.0, 0.5, 0.0), za.Vec3.up());
@@ -93,30 +90,54 @@ pub fn main() !void {
 
         camera.update(dt);
 
+        // Upload any assets that finished loading in the background
+        {
+            var upload = try Upload.begin(core);
+            try assets.update(&upload);
+            try upload.end();
+        }
+
         if (try core.beginFrame()) |frame| {
             const renderpass = try frame.renderpass(.{ .r = 0.1, .g = 0.1, .b = 0.1, .a = 1.0 }, depth_texture.handle);
 
-            // Draw Skybox
-            sky_pipeline.bind(renderpass);
-            renderpass.bindFragmentSamplers(0, &.{.{ .texture = assets.getTexture(tex_sky).handle, .sampler = sampler }});
+            // Fetch current state of assets
+            const maybe_mesh_viking = assets.getMesh("viking_room");
+            const maybe_tex_viking = assets.getTexture("Content/Images/viking_room.png");
 
-            const proj = camera.getProjMatrix(za.Vec2.new(@floatFromInt(width), @floatFromInt(height)));
-            var view = camera.getViewMatrix();
-            view.data[3][0] = 0;
-            view.data[3][1] = 0;
-            view.data[3][2] = 0;
+            const maybe_mesh_sky = assets.getMesh("sky_cube");
+            const maybe_tex_sky = assets.getTexture("skybox");
 
-            const sky_mvp = za.Mat4.mul(proj, view);
-            frame.command_buffer.pushVertexUniformData(0, std.mem.asBytes(&sky_mvp));
-            assets.getMesh(mesh_sky).draw(renderpass);
+            // 1. Draw Skybox
+            // Only draw if BOTH the mesh and the cubemap texture are ready
+            if (maybe_mesh_sky) |sky_mesh| {
+                if (maybe_tex_sky) |sky_tex| {
+                    sky_pipeline.bind(renderpass);
+                    renderpass.bindFragmentSamplers(0, &.{.{ .texture = sky_tex.handle, .sampler = sampler }});
 
-            // Draw Scene
-            main_pipeline.bind(renderpass);
-            renderpass.bindFragmentSamplers(0, &.{.{ .texture = assets.getTexture(tex_viking).handle, .sampler = sampler }});
+                    const proj = camera.getProjMatrix(za.Vec2.new(@floatFromInt(width), @floatFromInt(height)));
+                    var view = camera.getViewMatrix();
+                    // Remove translation for skybox
+                    view.data[3][0] = 0;
+                    view.data[3][1] = 0;
+                    view.data[3][2] = 0;
 
-            const mat = camera.getDescriptorMatrix(za.Vec2.new(@floatFromInt(width), @floatFromInt(height)));
-            frame.command_buffer.pushVertexUniformData(0, std.mem.asBytes(&mat));
-            assets.getMesh(mesh_viking).draw(renderpass);
+                    const sky_mvp = za.Mat4.mul(proj, view);
+                    frame.command_buffer.pushVertexUniformData(0, std.mem.asBytes(&sky_mvp));
+                    sky_mesh.draw(renderpass);
+                }
+            }
+
+            // 2. Draw Scene
+            if (maybe_mesh_viking) |mesh| {
+                if (maybe_tex_viking) |tex| {
+                    main_pipeline.bind(renderpass);
+                    renderpass.bindFragmentSamplers(0, &.{.{ .texture = tex.handle, .sampler = sampler }});
+
+                    const mat = camera.getDescriptorMatrix(za.Vec2.new(@floatFromInt(width), @floatFromInt(height)));
+                    frame.command_buffer.pushVertexUniformData(0, std.mem.asBytes(&mat));
+                    mesh.draw(renderpass);
+                }
+            }
 
             renderpass.end();
             try frame.end();
