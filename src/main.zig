@@ -33,7 +33,11 @@ pub fn main() !void {
     var height: u32 = @intCast(window_size.@"1");
 
     // --- 2. Asset Manager & Async Requests ---
-    var assets = try AssetManager.init(core, allocator);
+    var pool: std.Thread.Pool = undefined;
+    try pool.init(.{ .allocator = allocator });
+    defer pool.deinit();
+
+    var assets = try AssetManager.init(core, &pool, allocator);
     defer assets.deinit();
 
     // Request the scene texture
