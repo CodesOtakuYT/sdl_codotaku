@@ -7,7 +7,8 @@ const Camera = @import("camera.zig");
 const Mesh = @import("mesh.zig");
 const Texture = @import("texture.zig");
 const Pipeline = @import("pipeline.zig");
-const Upload = @import("upload.zig"); // Our new helper
+const Upload = @import("upload.zig");
+const AssetManager = @import("asset_manager.zig");
 
 pub fn main() !void {
     // --- Setup ---
@@ -17,7 +18,7 @@ pub fn main() !void {
     _ = try sdl3.setMemoryFunctionsByAllocator(allocator);
 
     var core = try Core.init(.{
-        .title = "SDL Codotaku - Upload Helper Active",
+        .title = "SDL Codotaku - Asset Manager Integration",
         .width = 800,
         .height = 600,
         .debug_mode = true,
@@ -30,33 +31,24 @@ pub fn main() !void {
     var width: u32 = @intCast(window_size.@"0");
     var height: u32 = @intCast(window_size.@"1");
 
-    // --- Asset Upload Session ---
+    // --- Asset Manager & Upload ---
+    var assets = AssetManager.init(core, allocator);
+    defer assets.deinit();
+
     var upload = try Upload.begin(core);
 
-    const texture = try Texture.loadPNG(core, upload.copy_pass, "Content/Images/viking_room.png");
-    errdefer texture.deinit(core);
-
-    const skybox_texture = try Texture.loadCubemap(core, upload.copy_pass, .{
+    // Load assets through the manager
+    const tex_h = try assets.loadTexture(&upload, "Content/Images/viking_room.png");
+    const sky_tex_h = try assets.loadCubemap(&upload, "skybox", .{
         "Content/Images/skybox/posx.png", "Content/Images/skybox/negx.png",
         "Content/Images/skybox/posy.png", "Content/Images/skybox/negy.png",
         "Content/Images/skybox/posz.png", "Content/Images/skybox/negz.png",
     });
-    errdefer skybox_texture.deinit(core);
 
-    var mesh = try Mesh.initObj(core, upload.copy_pass, @embedFile("viking_room.obj"));
-    errdefer mesh.deinit(core);
+    const mesh_h = try assets.loadMeshObj(&upload, "viking_room", @embedFile("viking_room.obj"));
+    const sky_mesh_h = try assets.loadMeshCube(&upload, "sky_cube");
 
-    var sky_mesh = try Mesh.initCube(core, upload.copy_pass);
-    errdefer sky_mesh.deinit(core);
-
-    // This closes the pass, submits, and waits for the GPU
     try upload.end();
-
-    // Now that they are safely on the GPU, we set up the defers
-    defer texture.deinit(core);
-    defer skybox_texture.deinit(core);
-    defer mesh.deinit(core);
-    defer sky_mesh.deinit(core);
 
     // --- Pipeline & State Setup ---
     var camera = Camera.init(za.Vec3.new(1.8, 1.8, 1.8), za.Vec3.new(0.0, 0.5, 0.0), za.Vec3.up());
@@ -103,7 +95,7 @@ pub fn main() !void {
 
             // 1. Draw Skybox
             sky_pipeline.bind(renderpass);
-            renderpass.bindFragmentSamplers(0, &.{.{ .texture = skybox_texture.handle, .sampler = sampler }});
+            renderpass.bindFragmentSamplers(0, &.{.{ .texture = assets.getTexture(sky_tex_h).handle, .sampler = sampler }});
 
             const proj = camera.getProjMatrix(za.Vec2.new(@floatFromInt(width), @floatFromInt(height)));
             var view = camera.getViewMatrix();
@@ -113,15 +105,15 @@ pub fn main() !void {
 
             const sky_mvp = za.Mat4.mul(proj, view);
             frame.command_buffer.pushVertexUniformData(0, std.mem.asBytes(&sky_mvp));
-            sky_mesh.draw(renderpass);
+            assets.getMesh(sky_mesh_h).draw(renderpass);
 
             // 2. Draw Scene
             main_pipeline.bind(renderpass);
-            renderpass.bindFragmentSamplers(0, &.{.{ .texture = texture.handle, .sampler = sampler }});
+            renderpass.bindFragmentSamplers(0, &.{.{ .texture = assets.getTexture(tex_h).handle, .sampler = sampler }});
 
             const mat = camera.getDescriptorMatrix(za.Vec2.new(@floatFromInt(width), @floatFromInt(height)));
             frame.command_buffer.pushVertexUniformData(0, std.mem.asBytes(&mat));
-            mesh.draw(renderpass);
+            assets.getMesh(mesh_h).draw(renderpass);
 
             renderpass.end();
             try frame.end();
