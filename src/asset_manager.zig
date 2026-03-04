@@ -13,18 +13,31 @@ const LoadResult = union(enum) {
     mesh: struct { name: []u8, data: Mesh.MeshData },
 };
 
+/// Internal state for an asset currently residing in a Staging Buffer
+/// awaiting completion of the GPU copy command.
+const UploadingAsset = struct {
+    name: []u8,
+    fence: sdl3.gpu.Fence,
+    resource: union(enum) {
+        texture: Texture,
+        mesh: Mesh,
+    },
+};
+
 const Self = @This();
 
 allocator: std.mem.Allocator,
 core: *Core,
 
-// Registries - Only modified on Main Thread via update()
+// --- Registries (Main Thread Only) ---
+// Only assets that are fully uploaded and ready for draw calls live here.
 textures: std.ArrayListUnmanaged(Texture) = .{},
 texture_paths: std.StringHashMapUnmanaged(AssetHandle) = .{},
 meshes: std.ArrayListUnmanaged(Mesh) = .{},
 mesh_paths: std.StringHashMapUnmanaged(AssetHandle) = .{},
 
-// Threading - Pointer to global pool owned by the caller
+// --- Async State ---
+uploading: std.ArrayListUnmanaged(UploadingAsset) = .{},
 pool: *std.Thread.Pool,
 result_channel: *Channel(LoadResult),
 
@@ -48,8 +61,6 @@ pub fn init(core: *Core, pool: *std.Thread.Pool, allocator: std.mem.Allocator) !
 }
 
 pub fn deinit(self: *Self) void {
-    // Note: We do NOT deinit self.pool. The caller is responsible for that.
-
     // 1. Drain any CPU results remaining in the channel
     while (self.result_channel.tryPop()) |res| {
         var mutable_res = res;
@@ -65,13 +76,24 @@ pub fn deinit(self: *Self) void {
         }
     }
 
-    // 2. Cleanup GPU Resources
+    // 2. Cleanup assets still in the middle of GPU upload
+    for (self.uploading.items) |u| {
+        self.allocator.free(u.name);
+        self.core.device.releaseFence(u.fence);
+        switch (u.resource) {
+            .texture => |t| t.deinit(self.core),
+            .mesh => |m| m.deinit(self.core),
+        }
+    }
+    self.uploading.deinit(self.allocator);
+
+    // 3. Cleanup GPU Resources in registries
     for (self.textures.items) |t| t.deinit(self.core);
     for (self.meshes.items) |m| m.deinit(self.core);
     self.textures.deinit(self.allocator);
     self.meshes.deinit(self.allocator);
 
-    // 3. Cleanup Path Strings
+    // 4. Cleanup String Table Paths
     var tex_iter = self.texture_paths.iterator();
     while (tex_iter.next()) |entry| self.allocator.free(entry.key_ptr.*);
     self.texture_paths.deinit(self.allocator);
@@ -80,7 +102,7 @@ pub fn deinit(self: *Self) void {
     while (mesh_iter.next()) |entry| self.allocator.free(entry.key_ptr.*);
     self.mesh_paths.deinit(self.allocator);
 
-    // 4. Cleanup internal structures
+    // 5. Cleanup internal structures
     const res_items = self.result_channel.queue.items[0 .. self.result_channel.queue.mask + 1];
     self.allocator.free(res_items);
     self.allocator.destroy(self.result_channel);
@@ -125,25 +147,61 @@ fn doLoadCube(self: *Self, name: []u8) void {
 
 // --- Public API ---
 
-pub fn update(self: *Self, upload: *Upload) !void {
-    while (self.result_channel.tryPop()) |res| {
+pub fn update(self: *Self) !void {
+    // Phase 1: Retire finished GPU uploads
+    // Check if the GPU has finished processing the fences for pending assets.
+    var u_idx: usize = 0;
+    while (u_idx < self.uploading.items.len) {
+        const u = &self.uploading.items[u_idx];
+        if (self.core.device.queryFence(u.fence)) {
+            const finished = self.uploading.swapRemove(u_idx);
+            self.core.device.releaseFence(finished.fence);
+
+            switch (finished.resource) {
+                .texture => |tex| {
+                    const handle: AssetHandle = @intCast(self.textures.items.len);
+                    try self.textures.append(self.allocator, tex);
+                    try self.texture_paths.put(self.allocator, finished.name, handle);
+                },
+                .mesh => |mesh| {
+                    const handle: AssetHandle = @intCast(self.meshes.items.len);
+                    try self.meshes.append(self.allocator, mesh);
+                    try self.mesh_paths.put(self.allocator, finished.name, handle);
+                },
+            }
+            // Do not increment u_idx, swapRemove moves a new element here
+        } else {
+            u_idx += 1;
+        }
+    }
+
+    // Phase 2: Start new uploads for items that finished CPU loading.
+    // We process one per frame to maintain smooth frame times.
+    if (self.result_channel.tryPop()) |res| {
+        var upload = try Upload.begin(self.core);
         var r = res;
         switch (r) {
             .texture => |*t| {
                 const tex = try t.data.upload(self.core, upload.copy_pass);
-                const handle: AssetHandle = @intCast(self.textures.items.len);
-                try self.textures.append(self.allocator, tex);
-                try self.texture_paths.put(self.allocator, try self.allocator.dupe(u8, t.name), handle);
                 t.data.deinit(self.allocator);
-                self.allocator.free(t.name);
+
+                const fence = try upload.submitAsync();
+                try self.uploading.append(self.allocator, .{
+                    .name = t.name,
+                    .fence = fence,
+                    .resource = .{ .texture = tex },
+                });
             },
             .mesh => |*m| {
                 const mesh = try m.data.upload(self.core, upload.copy_pass);
-                const handle: AssetHandle = @intCast(self.meshes.items.len);
-                try self.meshes.append(self.allocator, mesh);
-                try self.mesh_paths.put(self.allocator, try self.allocator.dupe(u8, m.name), handle);
                 m.data.deinit(self.allocator);
-                self.allocator.free(m.name);
+
+                const fence = try upload.submitAsync();
+                try self.uploading.append(self.allocator, .{
+                    .name = m.name,
+                    .fence = fence,
+                    .resource = .{ .mesh = mesh },
+                });
             },
         }
     }

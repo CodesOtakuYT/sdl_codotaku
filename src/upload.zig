@@ -18,14 +18,27 @@ pub fn begin(core: *Core) !Self {
     };
 }
 
-pub fn end(self: Self) !void {
+/// Submits the work and returns a Fence immediately.
+/// The caller is responsible for waiting/querying and releasing the fence.
+pub fn submitAsync(self: Self) !sdl3.gpu.Fence {
     self.copy_pass.end();
     const fence = try self.cmd.submitAndAcquireFence();
 
-    // Tell the belt this fence tracks the current chunks
+    // Link the staging belt chunks to this fence so they can be recycled
+    // once the GPU is done.
     try self.core.staging_belt.finish(fence);
 
-    // Block until the GPU is actually done (important for startup loading)
+    return fence;
+}
+
+/// Traditional blocking end.
+/// Useful for initial "Loading..." screens where you want everything ready NOW.
+pub fn end(self: Self) !void {
+    const fence = try self.submitAsync();
+
+    // Block the CPU until the GPU reaches this fence
     try self.core.device.waitForFences(true, &.{fence});
+
+    // Once we are past the wait, the fence is no longer needed
     self.core.device.releaseFence(fence);
 }

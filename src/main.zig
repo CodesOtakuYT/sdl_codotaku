@@ -19,7 +19,7 @@ pub fn main() !void {
     _ = try sdl3.setMemoryFunctionsByAllocator(allocator);
 
     var core = try Core.init(.{
-        .title = "SDL Codotaku - Async Skybox Fixed",
+        .title = "SDL Codotaku - Truly Async Engine",
         .width = 800,
         .height = 600,
         .debug_mode = true,
@@ -40,21 +40,17 @@ pub fn main() !void {
     var assets = try AssetManager.init(core, &pool, allocator);
     defer assets.deinit();
 
-    // Request the scene texture
+    // Fire off async requests. These do not block.
     try assets.requestTexture("Content/Images/viking_room.png");
-
-    // Request Meshes
     try assets.requestMeshObj("viking_room", @embedFile("viking_room.obj"));
     try assets.requestMeshCube("sky_cube");
-
-    // Request the Cubemap correctly
     try assets.requestCubemap("skybox", .{
         "Content/Images/skybox/posx.png", "Content/Images/skybox/negx.png",
         "Content/Images/skybox/posy.png", "Content/Images/skybox/negy.png",
         "Content/Images/skybox/posz.png", "Content/Images/skybox/negz.png",
     });
 
-    // --- 3. Pipeline & Graphics State ---
+    // --- 3. Graphics State ---
     var camera = Camera.init(za.Vec3.new(1.8, 1.8, 1.8), za.Vec3.new(0.0, 0.5, 0.0), za.Vec3.up());
     var depth_texture = try Texture.initDepth(core, width, height);
     defer depth_texture.deinit(core);
@@ -92,29 +88,18 @@ pub fn main() !void {
         const dt = @as(f32, @floatFromInt(current_ticks - start_ticks)) / 1000.0;
         start_ticks = current_ticks;
 
-        camera.update(dt);
+        // Non-blocking asset update.
+        // Handles: Checking CPU results -> Starting 1 GPU upload -> Checking 1 GPU fence.
+        try assets.update();
 
-        // Upload any assets that finished loading in the background
-        {
-            var upload = try Upload.begin(core);
-            try assets.update(&upload);
-            try upload.end();
-        }
+        camera.update(dt);
 
         if (try core.beginFrame()) |frame| {
             const renderpass = try frame.renderpass(.{ .r = 0.1, .g = 0.1, .b = 0.1, .a = 1.0 }, depth_texture.handle);
 
-            // Fetch current state of assets
-            const maybe_mesh_viking = assets.getMesh("viking_room");
-            const maybe_tex_viking = assets.getTexture("Content/Images/viking_room.png");
-
-            const maybe_mesh_sky = assets.getMesh("sky_cube");
-            const maybe_tex_sky = assets.getTexture("skybox");
-
             // 1. Draw Skybox
-            // Only draw if BOTH the mesh and the cubemap texture are ready
-            if (maybe_mesh_sky) |sky_mesh| {
-                if (maybe_tex_sky) |sky_tex| {
+            if (assets.getMesh("sky_cube")) |sky_mesh| {
+                if (assets.getTexture("skybox")) |sky_tex| {
                     sky_pipeline.bind(renderpass);
                     renderpass.bindFragmentSamplers(0, &.{.{ .texture = sky_tex.handle, .sampler = sampler }});
 
@@ -132,8 +117,8 @@ pub fn main() !void {
             }
 
             // 2. Draw Scene
-            if (maybe_mesh_viking) |mesh| {
-                if (maybe_tex_viking) |tex| {
+            if (assets.getMesh("viking_room")) |mesh| {
+                if (assets.getTexture("Content/Images/viking_room.png")) |tex| {
                     main_pipeline.bind(renderpass);
                     renderpass.bindFragmentSamplers(0, &.{.{ .texture = tex.handle, .sampler = sampler }});
 
