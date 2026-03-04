@@ -3,96 +3,69 @@ const Core = @import("core.zig");
 const za = Core.za;
 const sdl3 = Core.sdl3;
 const obj = @import("obj");
-const Buffer = @import("buffer.zig"); // Import our new abstraction
+const Buffer = @import("buffer.zig");
 const Vertex = @import("vertex.zig").Vertex;
 
-const Self = @This();
+// External data for the primitive cube
+const cube_data = @import("cube_data.zig");
 
+const Mesh = @This();
+
+// --- GPU Handles ---
 vertex_buffer: Buffer,
 index_buffer: Buffer,
 index_count: u32,
 
-pub fn init(core: *Core, copy_pass: sdl3.gpu.CopyPass, vertices: []const Vertex, indices: []const u32) !Self {
-    const v_buf = try Buffer.createWithData(
-        core,
-        copy_pass,
-        std.mem.sliceAsBytes(vertices),
-        .{ .vertex = true },
-    );
+/// Intermediate CPU-side storage for mesh data.
+/// This allows parsing/generation to happen independently of the GPU context.
+pub const MeshData = struct {
+    vertices: std.ArrayListUnmanaged(Vertex) = .{},
+    indices: std.ArrayListUnmanaged(u32) = .{},
 
-    const i_buf = try Buffer.createWithData(
-        core,
-        copy_pass,
-        std.mem.sliceAsBytes(indices),
-        .{ .index = true },
-    );
+    pub fn deinit(self: *MeshData, allocator: std.mem.Allocator) void {
+        self.vertices.deinit(allocator);
+        self.indices.deinit(allocator);
+    }
 
-    return .{
-        .vertex_buffer = v_buf,
-        .index_buffer = i_buf,
-        .index_count = @intCast(indices.len),
-    };
-}
+    /// Takes the CPU data and creates the GPU buffers.
+    pub fn upload(self: MeshData, core: *Core, copy_pass: sdl3.gpu.CopyPass) !Mesh {
+        const v_buf = try Buffer.createWithData(
+            core,
+            copy_pass,
+            std.mem.sliceAsBytes(self.vertices.items),
+            .{ .vertex = true },
+        );
 
-pub fn initCube(core: *Core, copy_pass: sdl3.gpu.CopyPass) !Self {
-    var vertices = [_]Vertex{
-        // Front Face (Z+)
-        .{ .position = za.Vec3.new(-0.5, 0.5, 0.5), .uv = za.Vec2.new(0, 0) },
-        .{ .position = za.Vec3.new(0.5, 0.5, 0.5), .uv = za.Vec2.new(1, 0) },
-        .{ .position = za.Vec3.new(0.5, -0.5, 0.5), .uv = za.Vec2.new(1, 1) },
-        .{ .position = za.Vec3.new(-0.5, -0.5, 0.5), .uv = za.Vec2.new(0, 1) },
-        // ... (remaining faces same as before)
-        // Back Face (Z-)
-        .{ .position = za.Vec3.new(0.5, 0.5, -0.5), .uv = za.Vec2.new(0, 0) },
-        .{ .position = za.Vec3.new(-0.5, 0.5, -0.5), .uv = za.Vec2.new(1, 0) },
-        .{ .position = za.Vec3.new(-0.5, -0.5, -0.5), .uv = za.Vec2.new(1, 1) },
-        .{ .position = za.Vec3.new(0.5, -0.5, -0.5), .uv = za.Vec2.new(0, 1) },
-        // Left Face (X-)
-        .{ .position = za.Vec3.new(-0.5, 0.5, -0.5), .uv = za.Vec2.new(0, 0) },
-        .{ .position = za.Vec3.new(-0.5, 0.5, 0.5), .uv = za.Vec2.new(1, 0) },
-        .{ .position = za.Vec3.new(-0.5, -0.5, 0.5), .uv = za.Vec2.new(1, 1) },
-        .{ .position = za.Vec3.new(-0.5, -0.5, -0.5), .uv = za.Vec2.new(0, 1) },
-        // Right Face (X+)
-        .{ .position = za.Vec3.new(0.5, 0.5, 0.5), .uv = za.Vec2.new(0, 0) },
-        .{ .position = za.Vec3.new(0.5, 0.5, -0.5), .uv = za.Vec2.new(1, 0) },
-        .{ .position = za.Vec3.new(0.5, -0.5, -0.5), .uv = za.Vec2.new(1, 1) },
-        .{ .position = za.Vec3.new(0.5, -0.5, 0.5), .uv = za.Vec2.new(0, 1) },
-        // Top Face (Y+)
-        .{ .position = za.Vec3.new(-0.5, 0.5, -0.5), .uv = za.Vec2.new(0, 0) },
-        .{ .position = za.Vec3.new(0.5, 0.5, -0.5), .uv = za.Vec2.new(1, 0) },
-        .{ .position = za.Vec3.new(0.5, 0.5, 0.5), .uv = za.Vec2.new(1, 1) },
-        .{ .position = za.Vec3.new(-0.5, 0.5, 0.5), .uv = za.Vec2.new(0, 1) },
-        // Bottom Face (Y-)
-        .{ .position = za.Vec3.new(-0.5, -0.5, 0.5), .uv = za.Vec2.new(0, 0) },
-        .{ .position = za.Vec3.new(0.5, -0.5, 0.5), .uv = za.Vec2.new(1, 0) },
-        .{ .position = za.Vec3.new(0.5, -0.5, -0.5), .uv = za.Vec2.new(1, 1) },
-        .{ .position = za.Vec3.new(-0.5, -0.5, -0.5), .uv = za.Vec2.new(0, 1) },
-    };
+        const i_buf = try Buffer.createWithData(
+            core,
+            copy_pass,
+            std.mem.sliceAsBytes(self.indices.items),
+            .{ .index = true },
+        );
 
-    var indices = [_]u32{
-        0, 1, 2, 2, 3, 0, // Front
-        4, 5, 6, 6, 7, 4, // Back
-        8, 9, 10, 10, 11, 8, // Left
-        12, 13, 14, 14, 15, 12, // Right
-        16, 17, 18, 18, 19, 16, // Top
-        20, 21, 22, 22, 23, 20, // Bottom
-    };
+        return .{
+            .vertex_buffer = v_buf,
+            .index_buffer = i_buf,
+            .index_count = @intCast(self.indices.items.len),
+        };
+    }
+};
 
-    return .init(core, copy_pass, &vertices, &indices);
-}
+// --- CPU Loading Logic ---
 
-pub fn initObj(core: *Core, copy_pass: sdl3.gpu.CopyPass, data: []const u8) !Self {
-    // ... (OBJ parsing logic remains identical)
-    var model = try obj.parseObj(core.allocator, data);
-    defer model.deinit(core.allocator);
+/// Parses raw OBJ text into MeshData.
+/// No GPU device or command buffer required here.
+pub fn loadObj(allocator: std.mem.Allocator, data: []const u8) !MeshData {
+    var model = try obj.parseObj(allocator, data);
+    defer model.deinit(allocator);
 
-    var unique_vertices = std.AutoHashMap(obj.Mesh.Index, u32).init(core.allocator);
+    var unique_vertices = std.AutoHashMap(obj.Mesh.Index, u32).init(allocator);
     defer unique_vertices.deinit();
 
-    var out_vertices = std.ArrayList(Vertex).empty;
-    defer out_vertices.deinit(core.allocator);
-    var out_indices = std.ArrayList(u32).empty;
-    defer out_indices.deinit(core.allocator);
+    var out_vertices: std.ArrayListUnmanaged(Vertex) = .{};
+    errdefer out_vertices.deinit(allocator);
+    var out_indices: std.ArrayListUnmanaged(u32) = .{};
+    errdefer out_indices.deinit(allocator);
 
     for (model.meshes) |m| {
         var face_offset: usize = 0;
@@ -115,26 +88,39 @@ pub fn initObj(core: *Core, copy_pass: sdl3.gpu.CopyPass, data: []const u8) !Sel
                             uv = za.Vec2.new(model.tex_coords[t_base], 1.0 - model.tex_coords[t_base + 1]);
                         }
                         result.value_ptr.* = @intCast(out_vertices.items.len);
-                        try out_vertices.append(core.allocator, .{ .position = pos, .uv = uv });
+                        try out_vertices.append(allocator, .{ .position = pos, .uv = uv });
                     }
-                    try out_indices.append(core.allocator, result.value_ptr.*);
+                    try out_indices.append(allocator, result.value_ptr.*);
                 }
             }
             face_offset += v_count;
         }
     }
 
-    return .init(core, copy_pass, out_vertices.items, out_indices.items);
+    return MeshData{ .vertices = out_vertices, .indices = out_indices };
 }
 
-pub fn deinit(self: Self, core: *Core) void {
-    // Explicitly using the Buffer's deinit logic
+/// Generates a cube MeshData using data from an external file.
+pub fn loadCube(allocator: std.mem.Allocator) !MeshData {
+    var out_vertices: std.ArrayListUnmanaged(Vertex) = .{};
+    errdefer out_vertices.deinit(allocator);
+    var out_indices: std.ArrayListUnmanaged(u32) = .{};
+    errdefer out_indices.deinit(allocator);
+
+    try out_vertices.appendSlice(allocator, &cube_data.vertices);
+    try out_indices.appendSlice(allocator, &cube_data.indices);
+
+    return MeshData{ .vertices = out_vertices, .indices = out_indices };
+}
+
+// --- GPU Runtime Logic ---
+
+pub fn deinit(self: Mesh, core: *Core) void {
     self.vertex_buffer.deinit(core);
     self.index_buffer.deinit(core);
 }
 
-pub fn draw(self: Self, renderpass: sdl3.gpu.RenderPass) void {
-    // Reference the .handle inside our Buffer structs
+pub fn draw(self: Mesh, renderpass: sdl3.gpu.RenderPass) void {
     renderpass.bindIndexBuffer(.{ .buffer = self.index_buffer.handle, .offset = 0 }, .indices_32bit);
     renderpass.bindVertexBuffers(0, &.{.{
         .buffer = self.vertex_buffer.handle,
