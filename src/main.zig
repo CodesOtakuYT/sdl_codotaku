@@ -19,7 +19,7 @@ pub fn main() !void {
     _ = try sdl3.setMemoryFunctionsByAllocator(allocator);
 
     var core = try Core.init(.{
-        .title = "SDL Codotaku - Separated Mesh Loading",
+        .title = "SDL Codotaku - Clean Load/Upload Split",
         .width = 800,
         .height = 600,
         .debug_mode = true,
@@ -32,37 +32,37 @@ pub fn main() !void {
     var width: u32 = @intCast(window_size.@"0");
     var height: u32 = @intCast(window_size.@"1");
 
-    // --- 2. CPU Loading Phase ---
-    // We load data into CPU RAM first. No GPU interaction yet.
-    var viking_mesh_data = try Mesh.loadObj(allocator, @embedFile("viking_room.obj"));
-    defer viking_mesh_data.deinit(allocator);
+    // --- 2. CPU Loading Phase (The "Heavy" Work) ---
+    // Meshes
+    var viking_mesh_cpu = try Mesh.loadObj(allocator, @embedFile("viking_room.obj"));
+    defer viking_mesh_cpu.deinit(allocator);
 
-    var sky_mesh_data = try Mesh.loadCube(allocator);
-    defer sky_mesh_data.deinit(allocator);
+    var sky_mesh_cpu = try Mesh.loadCube(allocator);
+    defer sky_mesh_cpu.deinit(allocator);
 
-    // --- 3. GPU Upload Phase ---
-    var assets = AssetManager.init(core, allocator);
-    defer assets.deinit();
+    // Textures
+    var viking_tex_cpu = try Texture.loadPNGData(allocator, "Content/Images/viking_room.png");
+    defer viking_tex_cpu.deinit(allocator);
 
-    var upload = try Upload.begin(core);
-
-    // Load Textures (assuming AssetManager still handles these directly for now)
-    const tex_h = try assets.loadTexture(&upload, "Content/Images/viking_room.png");
-    const sky_tex_h = try assets.loadCubemap(&upload, "skybox", .{
+    var sky_tex_cpu = try Texture.loadCubemapData(allocator, .{
         "Content/Images/skybox/posx.png", "Content/Images/skybox/negx.png",
         "Content/Images/skybox/posy.png", "Content/Images/skybox/negy.png",
         "Content/Images/skybox/posz.png", "Content/Images/skybox/negz.png",
     });
+    defer sky_tex_cpu.deinit(allocator);
 
-    // Upload the CPU mesh data to GPU buffers
-    // This is where we bridge the gap between CPU and VRAM
-    const mesh_viking = try viking_mesh_data.upload(core, upload.copy_pass);
-    const mesh_sky = try sky_mesh_data.upload(core, upload.copy_pass);
+    // --- 3. GPU Upload Phase ---
+    // We begin a command buffer and copy pass to move data to VRAM.
+    var upload = try Upload.begin(core);
 
-    try upload.end();
-    // After upload.end() and the defers above, CPU-side mesh data is freed.
+    const mesh_viking = try viking_mesh_cpu.upload(core, upload.copy_pass);
+    const mesh_sky = try sky_mesh_cpu.upload(core, upload.copy_pass);
+    const tex_viking = try viking_tex_cpu.upload(core, upload.copy_pass);
+    const tex_sky = try sky_tex_cpu.upload(core, upload.copy_pass);
 
-    // --- 4. Pipeline & Graphics State ---
+    try upload.end(); // GPU sync happens here
+
+    // --- 4. Pipeline & State Setup ---
     var camera = Camera.init(za.Vec3.new(1.8, 1.8, 1.8), za.Vec3.new(0.0, 0.5, 0.0), za.Vec3.up());
     var depth_texture = try Texture.initDepth(core, width, height);
     defer depth_texture.deinit(core);
@@ -107,14 +107,13 @@ pub fn main() !void {
 
             // Draw Skybox
             sky_pipeline.bind(renderpass);
-            renderpass.bindFragmentSamplers(0, &.{.{ .texture = assets.getTexture(sky_tex_h).handle, .sampler = sampler }});
+            renderpass.bindFragmentSamplers(0, &.{.{ .texture = tex_sky.handle, .sampler = sampler }});
 
             const proj = camera.getProjMatrix(za.Vec2.new(@floatFromInt(width), @floatFromInt(height)));
             var view = camera.getViewMatrix();
-            // Zero out translation for skybox
             view.data[3][0] = 0;
             view.data[3][1] = 0;
-            view.data[3][2] = 0;
+            view.data[3][2] = 0; // Fix skybox to camera
 
             const sky_mvp = za.Mat4.mul(proj, view);
             frame.command_buffer.pushVertexUniformData(0, std.mem.asBytes(&sky_mvp));
@@ -122,7 +121,7 @@ pub fn main() !void {
 
             // Draw Scene
             main_pipeline.bind(renderpass);
-            renderpass.bindFragmentSamplers(0, &.{.{ .texture = assets.getTexture(tex_h).handle, .sampler = sampler }});
+            renderpass.bindFragmentSamplers(0, &.{.{ .texture = tex_viking.handle, .sampler = sampler }});
 
             const mat = camera.getDescriptorMatrix(za.Vec2.new(@floatFromInt(width), @floatFromInt(height)));
             frame.command_buffer.pushVertexUniformData(0, std.mem.asBytes(&mat));
@@ -147,7 +146,9 @@ pub fn main() !void {
         }
     }
 
-    // Explicit cleanup for the meshes we manually uploaded
+    // --- 6. VRAM Cleanup ---
     mesh_viking.deinit(core);
     mesh_sky.deinit(core);
+    tex_viking.deinit(core);
+    tex_sky.deinit(core);
 }
