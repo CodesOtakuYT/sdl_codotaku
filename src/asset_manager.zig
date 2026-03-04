@@ -12,21 +12,17 @@ const Self = @This();
 allocator: std.mem.Allocator,
 core: *Core,
 
-// Registries
-textures: std.ArrayListUnmanaged(Texture),
-texture_paths: std.StringHashMapUnmanaged(AssetHandle),
+// Registries - Using Unmanaged as per current Zig std style
+textures: std.ArrayListUnmanaged(Texture) = .{},
+texture_paths: std.StringHashMapUnmanaged(AssetHandle) = .{},
 
-meshes: std.ArrayListUnmanaged(Mesh),
-mesh_paths: std.StringHashMapUnmanaged(AssetHandle),
+meshes: std.ArrayListUnmanaged(Mesh) = .{},
+mesh_paths: std.StringHashMapUnmanaged(AssetHandle) = .{},
 
 pub fn init(core: *Core, allocator: std.mem.Allocator) Self {
     return .{
         .allocator = allocator,
         .core = core,
-        .textures = .empty,
-        .texture_paths = .empty,
-        .meshes = .empty,
-        .mesh_paths = .empty,
     };
 }
 
@@ -36,16 +32,31 @@ pub fn deinit(self: *Self) void {
 
     self.textures.deinit(self.allocator);
     self.meshes.deinit(self.allocator);
+
+    // Clean up the duplicated string keys in the hash maps
+    var tex_iter = self.texture_paths.iterator();
+    while (tex_iter.next()) |entry| self.allocator.free(entry.key_ptr.*);
     self.texture_paths.deinit(self.allocator);
+
+    var mesh_iter = self.mesh_paths.iterator();
+    while (mesh_iter.next()) |entry| self.allocator.free(entry.key_ptr.*);
     self.mesh_paths.deinit(self.allocator);
 }
+
+// --- Texture Loading ---
 
 pub fn loadTexture(self: *Self, upload: *Upload, path: [:0]const u8) !AssetHandle {
     if (self.texture_paths.get(path)) |handle| return handle;
 
-    const tex = try Texture.loadPNG(self.core, upload.copy_pass, path);
-    const handle: AssetHandle = @intCast(self.textures.items.len);
+    // 1. Load CPU Data
+    var data = try Texture.loadPNGData(self.allocator, path);
+    defer data.deinit(self.allocator);
 
+    // 2. Upload to GPU
+    const tex = try data.upload(self.core, upload.copy_pass);
+
+    // 3. Cache
+    const handle: AssetHandle = @intCast(self.textures.items.len);
     try self.textures.append(self.allocator, tex);
     try self.texture_paths.put(self.allocator, try self.allocator.dupe(u8, path), handle);
 
@@ -55,21 +66,32 @@ pub fn loadTexture(self: *Self, upload: *Upload, path: [:0]const u8) !AssetHandl
 pub fn loadCubemap(self: *Self, upload: *Upload, name: []const u8, paths: [6][:0]const u8) !AssetHandle {
     if (self.texture_paths.get(name)) |handle| return handle;
 
-    const tex = try Texture.loadCubemap(self.core, upload.copy_pass, paths);
-    const handle: AssetHandle = @intCast(self.textures.items.len);
+    var data = try Texture.loadCubemapData(self.allocator, paths);
+    defer data.deinit(self.allocator);
 
+    const tex = try data.upload(self.core, upload.copy_pass);
+
+    const handle: AssetHandle = @intCast(self.textures.items.len);
     try self.textures.append(self.allocator, tex);
     try self.texture_paths.put(self.allocator, try self.allocator.dupe(u8, name), handle);
 
     return handle;
 }
 
-pub fn loadMeshObj(self: *Self, upload: *Upload, name: []const u8, data: []const u8) !AssetHandle {
+// --- Mesh Loading ---
+
+pub fn loadMeshObj(self: *Self, upload: *Upload, name: []const u8, data_raw: []const u8) !AssetHandle {
     if (self.mesh_paths.get(name)) |handle| return handle;
 
-    const mesh = try Mesh.initObj(self.core, upload.copy_pass, data);
-    const handle: AssetHandle = @intCast(self.meshes.items.len);
+    // 1. Load CPU Data
+    var data = try Mesh.loadObj(self.allocator, data_raw);
+    defer data.deinit(self.allocator);
 
+    // 2. Upload to GPU
+    const mesh = try data.upload(self.core, upload.copy_pass);
+
+    // 3. Cache
+    const handle: AssetHandle = @intCast(self.meshes.items.len);
     try self.meshes.append(self.allocator, mesh);
     try self.mesh_paths.put(self.allocator, try self.allocator.dupe(u8, name), handle);
 
@@ -79,14 +101,19 @@ pub fn loadMeshObj(self: *Self, upload: *Upload, name: []const u8, data: []const
 pub fn loadMeshCube(self: *Self, upload: *Upload, name: []const u8) !AssetHandle {
     if (self.mesh_paths.get(name)) |handle| return handle;
 
-    const mesh = try Mesh.initCube(self.core, upload.copy_pass);
-    const handle: AssetHandle = @intCast(self.meshes.items.len);
+    var data = try Mesh.loadCube(self.allocator);
+    defer data.deinit(self.allocator);
 
+    const mesh = try data.upload(self.core, upload.copy_pass);
+
+    const handle: AssetHandle = @intCast(self.meshes.items.len);
     try self.meshes.append(self.allocator, mesh);
     try self.mesh_paths.put(self.allocator, try self.allocator.dupe(u8, name), handle);
 
     return handle;
 }
+
+// --- Getters ---
 
 pub fn getTexture(self: Self, handle: AssetHandle) Texture {
     return self.textures.items[handle];
