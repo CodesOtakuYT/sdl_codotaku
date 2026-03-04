@@ -9,20 +9,18 @@ const Texture = @import("texture.zig");
 const Pipeline = @import("pipeline.zig");
 
 pub fn main() !void {
-    // --- Setup ---
     var debug_allocator = std.heap.DebugAllocator(.{}).init;
     defer std.debug.assert(debug_allocator.deinit() == .ok);
     const allocator = debug_allocator.allocator();
     _ = try sdl3.setMemoryFunctionsByAllocator(allocator);
 
-    // Core.init now returns *Core (allocated on heap)
     var core = try Core.init(.{
-        .title = "SDL Codotaku - Staging Belt Active",
+        .title = "SDL Codotaku - Refactored Staging",
         .width = 800,
         .height = 600,
         .debug_mode = true,
         .allocator = allocator,
-        .staging_chunk_size = 1024 * 1024, // 1MB chunks
+        .staging_chunk_size = 1024 * 1024,
     });
     defer core.deinit();
 
@@ -30,23 +28,46 @@ pub fn main() !void {
     var width: u32 = @intCast(window_size.@"0");
     var height: u32 = @intCast(window_size.@"1");
 
-    // --- Resources: Camera & Buffers ---
-    var camera = Camera.init(za.Vec3.new(1.8, 1.8, 1.8), za.Vec3.new(0.0, 0.5, 0.0), za.Vec3.up());
+    const upload_cmd = try core.device.acquireCommandBuffer();
+    const copy_pass = upload_cmd.beginCopyPass();
 
+    const texture = try Texture.loadPNG(core, copy_pass, "Content/Images/viking_room.png");
+
+    const skybox_texture = try Texture.loadCubemap(core, copy_pass, .{
+        "Content/Images/skybox/posx.png", "Content/Images/skybox/negx.png",
+        "Content/Images/skybox/posy.png", "Content/Images/skybox/negy.png",
+        "Content/Images/skybox/posz.png", "Content/Images/skybox/negz.png",
+    });
+
+    var mesh = try Mesh.initObj(core, copy_pass, @embedFile("viking_room.obj"));
+    var sky_mesh = try Mesh.initCube(core, copy_pass);
+
+    copy_pass.end();
+
+    const upload_fence = try upload_cmd.submitAndAcquireFence();
+    try core.staging_belt.finish(upload_fence);
+    try core.device.waitForFences(true, &.{upload_fence});
+    core.device.releaseFence(upload_fence);
+
+    defer texture.deinit(core);
+    defer skybox_texture.deinit(core);
+    defer mesh.deinit(core);
+    defer sky_mesh.deinit(core);
+
+    var camera = Camera.init(za.Vec3.new(1.8, 1.8, 1.8), za.Vec3.new(0.0, 0.5, 0.0), za.Vec3.up());
     var depth_texture = try Texture.initDepth(core, width, height);
     defer depth_texture.deinit(core);
 
     const sampler = try Texture.createSampler(core, .{
-        .min_filter = .nearest,
-        .mag_filter = .nearest,
-        .mipmap_mode = .nearest,
+        .min_filter = .linear,
+        .mag_filter = .linear,
+        .mipmap_mode = .linear,
         .address_mode_u = .repeat,
         .address_mode_v = .repeat,
         .address_mode_w = .repeat,
     });
     defer core.device.releaseSampler(sampler);
 
-    // --- Resources: Pipelines ---
     const main_pipeline = try Pipeline.init(core, .{
         .vert_spec = .{ .filename = "TexturedQuadWithMatrix.vert", .uniform_buffer_count = 1 },
         .frag_spec = .{ .filename = "TexturedQuad.frag", .sampler_count = 1 },
@@ -62,24 +83,6 @@ pub fn main() !void {
     });
     defer sky_pipeline.deinit(core);
 
-    // --- Resources: Assets ---
-    const texture = try Texture.loadPNG(core, "Content/Images/viking_room.png");
-    defer texture.deinit(core);
-
-    const skybox_texture = try Texture.loadCubemap(core, .{
-        "Content/Images/skybox/posx.png", "Content/Images/skybox/negx.png",
-        "Content/Images/skybox/posy.png", "Content/Images/skybox/negy.png",
-        "Content/Images/skybox/posz.png", "Content/Images/skybox/negz.png",
-    });
-    defer skybox_texture.deinit(core);
-
-    var mesh = try Mesh.initObj(core, @embedFile("viking_room.obj"));
-    defer mesh.deinit(core);
-
-    var sky_mesh = try Mesh.initCube(core);
-    defer sky_mesh.deinit(core);
-
-    // --- Main Loop ---
     var start_ticks = sdl3.timer.getMillisecondsSinceInit();
     var quit = false;
     while (!quit) {
@@ -92,12 +95,12 @@ pub fn main() !void {
         if (try core.beginFrame()) |frame| {
             const renderpass = try frame.renderpass(.{ .r = 0.1, .g = 0.1, .b = 0.1, .a = 1.0 }, depth_texture.handle);
 
-            // Draw Skybox
             sky_pipeline.bind(renderpass);
             renderpass.bindFragmentSamplers(0, &.{.{ .texture = skybox_texture.handle, .sampler = sampler }});
 
             const proj = camera.getProjMatrix(za.Vec2.new(@floatFromInt(width), @floatFromInt(height)));
             var view = camera.getViewMatrix();
+
             view.data[3][0] = 0;
             view.data[3][1] = 0;
             view.data[3][2] = 0;
@@ -106,7 +109,6 @@ pub fn main() !void {
             frame.command_buffer.pushVertexUniformData(0, std.mem.asBytes(&sky_mvp));
             sky_mesh.draw(renderpass);
 
-            // Draw Scene
             main_pipeline.bind(renderpass);
             renderpass.bindFragmentSamplers(0, &.{.{ .texture = texture.handle, .sampler = sampler }});
 
@@ -115,8 +117,6 @@ pub fn main() !void {
             mesh.draw(renderpass);
 
             renderpass.end();
-
-            // Frame.end() now submits the command buffer and tracks the fence for the belt
             try frame.end();
         }
 
@@ -127,7 +127,6 @@ pub fn main() !void {
                 .window_resized => |ev| {
                     width = @intCast(ev.width);
                     height = @intCast(ev.height);
-
                     depth_texture.deinit(core);
                     depth_texture = try Texture.initDepth(core, width, height);
                 },

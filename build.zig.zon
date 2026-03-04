@@ -33,8 +33,8 @@
     // internet connectivity.
     .dependencies = .{
         .sdl3 = .{
-            .url = "git+https://codeberg.org/7Games/zig-sdl3?ref=v0.1.7#318706d40fd56dbc67ad58a5a1be5c935ceb8585",
-            .hash = "sdl3-0.1.7-NmT1Q00HJwBQEXnwv_YWydIXUCKazlnPDACaXwwVQoHo",
+            .url = "git+https://codeberg.org/7Games/zig-sdl3?ref=v0.1.8#e45204c89b668b1ffcac415ea81f433a24dd04b2",
+            .hash = "sdl3-0.1.8-NmT1QwkiJwAos9AnY9s0dqRN9KKg2EuqjHrB_L1wC6H6",
         },
         .zalgebra = .{
             .url = "git+https://github.com/kooparse/zalgebra#fe19b7816f03d86d56d4fa62f943664edf5d367f",

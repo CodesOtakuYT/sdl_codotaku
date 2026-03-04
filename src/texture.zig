@@ -34,7 +34,8 @@ pub fn deinit(self: Self, core: *Core) void {
     core.device.releaseTexture(self.handle);
 }
 
-pub fn loadPNG(core: *Core, path: [:0]const u8) !Self {
+/// Now takes an external copy_pass. No longer blocks or submits.
+pub fn loadPNG(core: *Core, copy_pass: sdl3.gpu.CopyPass, path: [:0]const u8) !Self {
     const raw_surface = try sdl3.surface.Surface.initFromPngFile(path);
     defer raw_surface.deinit();
     const surface = try raw_surface.convertFormat(.array_rgba_32);
@@ -45,10 +46,9 @@ pub fn loadPNG(core: *Core, path: [:0]const u8) !Self {
     const texture = try Self.init(core, w, h, .r8g8b8a8_unorm, 1, .{ .sampler = true });
     errdefer texture.deinit(core);
 
-    const cmd = try core.device.acquireCommandBuffer();
-    const copy_pass = cmd.beginCopyPass();
     const row_size = w * 4;
 
+    // Request staging memory from the belt using the passed copy_pass
     const staging_slice = try core.staging_belt.writeTexture(
         copy_pass,
         .{ .texture = texture.handle, .width = w, .height = h, .depth = 1 },
@@ -61,16 +61,11 @@ pub fn loadPNG(core: *Core, path: [:0]const u8) !Self {
         @memcpy(staging_slice[y * row_size .. (y + 1) * row_size], src_pixels[y * pitch .. y * pitch + row_size]);
     }
 
-    copy_pass.end();
-    const fence = try cmd.submitAndAcquireFence();
-    try core.staging_belt.finish(fence);
-    try core.device.waitForFences(true, &.{fence});
-    core.device.releaseFence(fence);
-
     return texture;
 }
 
-pub fn loadCubemap(core: *Core, paths: [6][:0]const u8) !Self {
+/// Now takes an external copy_pass for all 6 faces.
+pub fn loadCubemap(core: *Core, copy_pass: sdl3.gpu.CopyPass, paths: [6][:0]const u8) !Self {
     var converted: [6]sdl3.surface.Surface = undefined;
     for (paths, 0..) |path, i| {
         const s = try sdl3.surface.Surface.initFromPngFile(path);
@@ -87,9 +82,6 @@ pub fn loadCubemap(core: *Core, paths: [6][:0]const u8) !Self {
     const texture = try Self.init(core, w, h, .r8g8b8a8_unorm, 6, .{ .sampler = true });
     errdefer texture.deinit(core);
 
-    const cmd = try core.device.acquireCommandBuffer();
-    const copy_pass = cmd.beginCopyPass();
-
     for (converted, 0..) |face, i| {
         const staging_slice = try core.staging_belt.writeTexture(
             copy_pass,
@@ -103,14 +95,6 @@ pub fn loadCubemap(core: *Core, paths: [6][:0]const u8) !Self {
             @memcpy(staging_slice[y * row_size .. (y + 1) * row_size], src_pixels[y * pitch .. y * pitch + row_size]);
         }
     }
-
-    copy_pass.end();
-    const fence = try cmd.submitAndAcquireFence();
-    // Finish moves active chunks to closed list. Only do this once per submission.
-    try core.staging_belt.finish(fence);
-
-    try core.device.waitForFences(true, &.{fence});
-    core.device.releaseFence(fence);
 
     return texture;
 }

@@ -26,9 +26,9 @@ pub const Chunk = struct {
 
 core: *Core,
 chunk_size: u32,
-active_chunks: std.ArrayListUnmanaged(Chunk) = .{},
-closed_chunks: std.ArrayListUnmanaged(Chunk) = .{},
-free_chunks: std.ArrayListUnmanaged(Chunk) = .{},
+active_chunks: std.ArrayList(Chunk) = .empty,
+closed_chunks: std.ArrayList(Chunk) = .empty,
+free_chunks: std.ArrayList(Chunk) = .empty,
 
 pub fn init(core: *Core, chunk_size: u32) Self {
     return .{

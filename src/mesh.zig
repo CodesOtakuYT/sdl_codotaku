@@ -12,23 +12,29 @@ vertex_buffer: Buffer,
 index_buffer: Buffer,
 index_count: u32,
 
-pub fn init(core: *Core, vertices: []Vertex, indices: []u32) !Self {
-    // Use the new batch upload API from buffer.zig
-    const buffers = try Buffer.uploadBatch(core, &.{
-        Buffer.asUpload(Vertex, vertices, .{ .vertex = true }),
-        Buffer.asUpload(u32, indices, .{ .index = true }),
-    });
-    // We can still free the slice returned by uploadBatch
-    defer core.allocator.free(buffers);
+pub fn init(core: *Core, copy_pass: sdl3.gpu.CopyPass, vertices: []const Vertex, indices: []const u32) !Self {
+    const v_buf = try Buffer.createWithData(
+        core,
+        copy_pass,
+        std.mem.sliceAsBytes(vertices),
+        .{ .vertex = true },
+    );
+
+    const i_buf = try Buffer.createWithData(
+        core,
+        copy_pass,
+        std.mem.sliceAsBytes(indices),
+        .{ .index = true },
+    );
 
     return .{
-        .vertex_buffer = buffers[0],
-        .index_buffer = buffers[1],
+        .vertex_buffer = v_buf,
+        .index_buffer = i_buf,
         .index_count = @intCast(indices.len),
     };
 }
 
-pub fn initCube(core: *Core) !Self {
+pub fn initCube(core: *Core, copy_pass: sdl3.gpu.CopyPass) !Self {
     var vertices = [_]Vertex{
         // Front Face (Z+)
         .{ .position = za.Vec3.new(-0.5, 0.5, 0.5), .uv = za.Vec2.new(0, 0) },
@@ -72,10 +78,10 @@ pub fn initCube(core: *Core) !Self {
         20, 21, 22, 22, 23, 20, // Bottom
     };
 
-    return .init(core, &vertices, &indices);
+    return .init(core, copy_pass, &vertices, &indices);
 }
 
-pub fn initObj(core: *Core, data: []const u8) !Self {
+pub fn initObj(core: *Core, copy_pass: sdl3.gpu.CopyPass, data: []const u8) !Self {
     // ... (OBJ parsing logic remains identical)
     var model = try obj.parseObj(core.allocator, data);
     defer model.deinit(core.allocator);
@@ -118,7 +124,7 @@ pub fn initObj(core: *Core, data: []const u8) !Self {
         }
     }
 
-    return .init(core, out_vertices.items, out_indices.items);
+    return .init(core, copy_pass, out_vertices.items, out_indices.items);
 }
 
 pub fn deinit(self: Self, core: *Core) void {
